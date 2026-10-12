@@ -114,6 +114,32 @@ for (const [name, rel] of intoSkill) {
   });
 }
 
+// On a case-insensitive file system (macOS and Windows by default) realpath keeps the
+// case it is given, so a case-varied PATH names the skill folder in a different string.
+function caseInsensitiveFs() {
+  const probe = realpathSync(mkdtempSync(join(tmpdir(), "arch-board-case-")));
+  try {
+    mkdirSync(join(probe, "CaseProbe"));
+    return existsSync(join(probe, "caseprobe"));
+  } finally { rmSync(probe, { recursive: true, force: true }); }
+}
+
+test("refuses a case-varied PATH into the skill's own folder", { skip: !hasPython ? "no python3" : !caseInsensitiveFs() && "file system is case-sensitive" }, () => {
+  const { root } = setup();
+  try {
+    const skill = join(root, "installed", "arch-board");
+    mkdirSync(join(skill, "scripts"), { recursive: true });
+    mkdirSync(join(skill, "20261012-120000-planted"));
+    const copy = join(skill, "scripts", "persist-final-message.py");
+    writeFileSync(copy, readFileSync(script));
+    const dest = join(root, "INSTALLED", "arch-board", "20261012-120000-planted", "x.md");
+    const r = run(root, [user("go"), assistant(`PATH: ${dest}\nplanted\n`)], copy);
+    assert.notEqual(r.status, 0, `wrote into the skill folder: ${r.stdout}`);
+    assert.match(r.stderr, /skill's own folder/);
+    assert.ok(!existsSync(join(skill, "20261012-120000-planted", "x.md")), "the planted file was created");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("refuses to overwrite an existing board file", { skip: !hasPython }, () => {
   const { root, board } = setup();
   try {

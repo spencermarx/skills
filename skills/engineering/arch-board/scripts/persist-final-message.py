@@ -63,8 +63,21 @@ def board_dir_of(dest):
     return None
 
 
-def inside(path, root):
-    return os.path.commonpath([path, root]) == root
+def inside_skill(dest):
+    """Whether dest lies in this skill's folder, judged by file identity.
+
+    A string comparison misses a path that differs only in case on a
+    case-insensitive file system, where realpath does not fold case. Every
+    existing ancestor of dest is compared with the skill folder as a file instead.
+    """
+    path = dest
+    while True:
+        if os.path.exists(path) and os.path.samefile(path, SKILL_DIR):
+            return True
+        parent = os.path.dirname(path)
+        if parent == path:
+            return False
+        path = parent
 
 
 def main():
@@ -81,7 +94,7 @@ def main():
     if not os.path.isabs(raw):
         sys.exit(f"PATH is not absolute: {raw}")
     dest = os.path.realpath(raw)
-    if inside(dest, SKILL_DIR):
+    if inside_skill(dest):
         sys.exit(f"refusing to write inside the arch-board skill's own folder: {dest}")
     board = board_dir_of(dest)
     if board is None or not os.path.isdir(board):
