@@ -69,8 +69,14 @@ context_discovery:
 
 default_team:
   # Form 1 — shorthand. N instances, no model override.
-  principal: 2    # Holistic architecture review
-  quality: 2      # Code quality and maintainability
+  # TWO reviewers, always: one principal and one architect. This outranks the
+  # auto-detection table in /ocr:review Phase 3 that says to ADD reviewers for
+  # auth, API, data or logic-heavy changes. If a lens fits a change better than
+  # one of these, SWAP it in rather than adding a third, and fold any concern
+  # only the dropped lens would catch into the remaining brief. A --team
+  # override replaces this pair for that one review.
+  principal: 1    # Holistic review: does the change hold together
+  architect: 1    # Boundaries, contracts, coupling: does the design still evolve
   # security: 1   # Auto-added for auth/API/data changes
   # testing: 1    # Auto-added for logic-heavy changes
 
