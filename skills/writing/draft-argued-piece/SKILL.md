@@ -78,12 +78,17 @@ committed to this repository unless the user asks.
 6. **Loop 4 to 5 until the user says it is done.**
 
 **When you cannot write the piece.** Some harnesses lock a background or
-isolated session out of the main checkout, where the scratch entry lives. If you
-cannot write `piece.md` from this session, return each block in your reply
-instead, and say that it belongs at the end of `piece.md`, giving that file's
-absolute path, so the user can add it. Never reach the file through another
-channel once a write is refused. `scratchpad`'s `place` verb is no help here: it
-refuses to overwrite, so it cannot serve a file that grows every turn.
+isolated session out of the main checkout, where the scratch entry lives. If
+your file-editing tools cannot write `piece.md`, take the route the `scratchpad`
+skill's `references/writing-into-a-locked-entry.md` gives, in its section "A
+loop that appends every turn", for a file that grows every turn: append each
+block with one plain shell redirect (`>>`) against `piece.md`'s absolute path,
+after re-reading the file as usual. A redirect only appends, so a rewrite of an
+earlier block goes back in your reply, saying which block it replaces. If the
+redirect is refused too, return each block in your reply instead and say that it
+belongs at the end of `piece.md`, giving that file's absolute path, so the user
+can add it. Never improvise another channel: no worktree-local copy, no other
+location, and not `scratchpad`'s `place` verb, which refuses to overwrite.
 
 ## What a block is
 
