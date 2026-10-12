@@ -23,10 +23,10 @@ function setup() {
   return { root, board };
 }
 
-function run(root, rows) {
+function run(root, rows, using = script) {
   const transcript = join(root, "transcript.jsonl");
   writeFileSync(transcript, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
-  return spawnSync("python3", [script, transcript], { encoding: "utf8" });
+  return spawnSync("python3", [using, transcript], { encoding: "utf8" });
 }
 
 test("writes the final message body to the PATH inside a board session", { skip: !hasPython }, () => {
@@ -66,7 +66,11 @@ const refusals = [
   ["a final message without a PATH line", (b) => "no path here\nbody\n", /PATH: line/],
   ["a relative PATH", () => "PATH: round-1/x.md\nbody\n", /not absolute/],
   ["a PATH outside any board session", (b, root) => `PATH: ${join(root, "elsewhere", "x.md")}\nbody\n`, /outside an existing arch-board/],
-  ["a PATH under a board directory that does not exist", (b, root) => `PATH: ${join(root, ".scratchpad", "arch-board", "missing-board", "x.md")}\nbody\n`, /outside an existing arch-board/],
+  ["a PATH under a board directory that does not exist", (b, root) => `PATH: ${join(root, ".scratchpad", "arch-board", "20261012-130000-missing", "x.md")}\nbody\n`, /outside an existing arch-board/],
+  ["a PATH under an arch-board folder that is not a scratch entry", (b, root) => {
+    mkdirSync(join(root, ".scratchpad", "arch-board", "notes"), { recursive: true });
+    return `PATH: ${join(root, ".scratchpad", "arch-board", "notes", "x.md")}\nbody\n`;
+  }, /outside an existing arch-board/],
   ["a PATH that climbs out of the board", (b, root) => `PATH: ${join(b, "..", "..", "..", "escaped.md")}\nbody\n`, /outside an existing arch-board/],
   ["a PATH with no body", (b) => `PATH: ${join(b, "round-1", "empty.md")}\n`, /no body/],
 ];
@@ -79,6 +83,33 @@ for (const [name, message, why] of refusals) {
       assert.notEqual(r.status, 0, `accepted ${name}: ${r.stdout}`);
       assert.match(r.stderr, why);
       assert.ok(!existsSync(join(root, "elsewhere")) && !existsSync(join(root, "escaped.md")));
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+}
+
+// An installed skill folder is itself named arch-board, so a PATH into it looks like a
+// board path. Each case runs a copy of the script from a copy of the skill folder.
+const intoSkill = [
+  ["references/x.md", ["references", "x.md"]],
+  ["scripts/x.sh", ["scripts", "x.sh"]],
+  ["a nested references/deep/a/b.md", ["references", "deep", "a", "b.md"]],
+  ["a folder named like a scratch entry", ["20261012-120000-planted", "x.md"]],
+];
+
+for (const [name, rel] of intoSkill) {
+  test(`refuses a PATH into the skill's own folder: ${name}`, { skip: !hasPython }, () => {
+    const { root } = setup();
+    try {
+      const skill = join(root, "installed", "arch-board");
+      for (const d of ["scripts", "references", "20261012-120000-planted"]) mkdirSync(join(skill, d), { recursive: true });
+      const copy = join(skill, "scripts", "persist-final-message.py");
+      writeFileSync(copy, readFileSync(script));
+      const dest = join(skill, ...rel);
+      const r = run(root, [user("go"), assistant(`PATH: ${dest}\nplanted\n`)], copy);
+      assert.notEqual(r.status, 0, `wrote into the skill folder: ${r.stdout}`);
+      assert.match(r.stderr, /skill's own folder/);
+      assert.ok(!existsSync(dest), `${dest} was created`);
+      assert.ok(!existsSync(join(skill, "references", "deep")), "created directories inside the skill");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 }

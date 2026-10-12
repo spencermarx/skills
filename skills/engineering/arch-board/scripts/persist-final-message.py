@@ -10,15 +10,22 @@ text of the assistant rows after the last user row; its first non-blank line
 must read `PATH: <absolute path>`. The rest is written there and the path
 printed, so the hands persist a refused write without restating the document.
 
-The path must lie inside an existing board directory (.../arch-board/<board>/),
-which the board's scratch session created, and must not exist yet.
+The path must lie inside an existing board directory, the scratch entry the
+board's session created (.../arch-board/<YYYYMMDD-HHMMSS>-<slug>/), must not be
+inside this skill's own folder, and must not exist yet. A PATH line is written by
+a subagent, so these checks are what keep it from adding files anywhere else,
+an installed skill's references/ or scripts/ included.
 """
 import json
 import os
+import re
 import sys
 
 USAGE = "usage: persist-final-message.py <subagent transcript.jsonl>"
 BOARD_SEGMENT = "arch-board"
+# A scratch entry's name: the UTC timestamp `new` stamps, then the kebab-case slug.
+BOARD_ENTRY = re.compile(r"^[0-9]{8}-[0-9]{6}-[a-z0-9]+(-[a-z0-9]+)*$")
+SKILL_DIR = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 
 def final_message(transcript):
@@ -47,13 +54,17 @@ def final_message(transcript):
 
 
 def board_dir_of(dest):
-    """The .../arch-board/<board> prefix of dest, or None when dest is not beneath one."""
+    """The .../arch-board/<entry> prefix of dest, or None when dest is not beneath one."""
     parts = dest.split(os.sep)
-    # The last arch-board segment that has a board directory and a file beneath it.
+    # The last arch-board segment followed by a scratch entry name and a file beneath it.
     for i in range(len(parts) - 3, -1, -1):
-        if parts[i] == BOARD_SEGMENT:
+        if parts[i] == BOARD_SEGMENT and BOARD_ENTRY.match(parts[i + 1]):
             return os.sep.join(parts[: i + 2])
     return None
+
+
+def inside(path, root):
+    return os.path.commonpath([path, root]) == root
 
 
 def main():
@@ -70,6 +81,8 @@ def main():
     if not os.path.isabs(raw):
         sys.exit(f"PATH is not absolute: {raw}")
     dest = os.path.realpath(raw)
+    if inside(dest, SKILL_DIR):
+        sys.exit(f"refusing to write inside the arch-board skill's own folder: {dest}")
     board = board_dir_of(dest)
     if board is None or not os.path.isdir(board):
         sys.exit(f"refusing to write outside an existing arch-board session directory: {dest}")
