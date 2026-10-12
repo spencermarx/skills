@@ -61,18 +61,17 @@ the user run the `setup-aclarify-skills` skill. In order:
    exactly.
 2. **Otherwise, a brand guide the user names**, or one in the conventions folder
    named in `docs/agents/workspace.md` (default: none).
-3. **Otherwise, `get-brand-kit`'s placeholder kit**, when that skill is
-   installed: load it as above and, with no folder set, it serves its own kit.
-   It is the last source before asking, and never outranks a brand guide the
-   user names.
-4. **With none of these,** ask the user for the brand guide or its core values:
+3. **With neither,** ask the user for the brand guide or its core values:
    palette, typefaces, logo rules. Ask the user, using your structured-question
    tool if you have one; otherwise list the questions numbered in plain text
    and stop until they reply. If they would rather you proceed, score the other
    six dimensions and mark Brand Consistency **not checked: no brand source**.
 
-If a brand file you read says `Status: placeholder`, tell the user that brand
-consistency was checked against a placeholder, not their brand.
+Never audit against `get-brand-kit`'s placeholder kit: with no folder set, it
+serves stand-in values, and a score against them says nothing about the brand.
+
+If a file in the configured folder still says `Status: placeholder`, tell the
+user that brand consistency was checked against a placeholder, not their brand.
 
 ## Step 1: identify the asset
 
