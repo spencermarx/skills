@@ -1,6 +1,6 @@
 ---
 name: domain-modeling
-description: Build and sharpen a project's domain model while designing. Use when the user wants to pin down domain terminology or a ubiquitous language, uses a vague or overloaded word, notices a term being used two ways, says the code and the language disagree, or when a significant design decision surfaces that may deserve a record, and when another skill needs to maintain the domain model. Owns the judgment of which terms matter and whether the language is right. Do NOT use to scaffold, format or restructure the glossary file (use `ubiquitous-language`), merely to read the glossary for vocabulary, or to author the decision record itself (use `decision-record`).
+description: Build and sharpen a project's domain model while designing. Use when the user wants to pin down a domain's vocabulary or settle what a term means, uses a vague or overloaded word, notices a term being used two ways, says the code and the language disagree, or when a significant design decision surfaces that may deserve a record, and when another skill needs to maintain the domain model. Owns the judgment of which terms matter and whether the language is right. Do NOT use to scaffold, format or restructure the glossary file (use `ubiquitous-language`), merely to read the glossary for vocabulary, or to author the decision record itself (use `decision-record`).
 metadata:
   credits: "Adapted from Matt Pocock's domain-modeling skill, https://github.com/mattpocock/skills (MIT)"
 ---

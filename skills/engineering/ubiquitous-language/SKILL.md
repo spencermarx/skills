@@ -1,14 +1,15 @@
 ---
 name: ubiquitous-language
 description: >-
-  Create or edit a repository's glossary file, the ubiquitous language of one bounded
-  context, or the map that indexes several. Use whenever a glossary file must be
-  scaffolded, written to, restructured or checked: set up the glossary, add or reword an
-  entry, write or update the glossary map, split one context into several, "where do
-  domain terms live", a map row pointing at a missing file, or when another skill has a
-  settled term to write down. Owns the format and the file. Do NOT use to decide which
-  terms matter or whether the language is right (use `domain-modeling`), or to record a
-  decision (use `decision-record`).
+  Create or edit a repository's glossary file (its name, place, sections and entry
+  format) or the glossary map that indexes one file per bounded context. Use whenever a
+  glossary file must be scaffolded, written to, restructured or checked: set up the
+  glossary, fix its format, add or reword an entry, write or update the glossary map,
+  split one context into several, "where do domain terms live", a map row pointing at a
+  missing file, or when another skill has a settled term to write down. Owns the format
+  and the file. Do NOT use to decide which terms matter, to pin down or settle a
+  ubiquitous language, or to judge whether the language is right (use
+  `domain-modeling`), or to record a decision (use `decision-record`).
 license: MIT
 argument-hint: '[the context name, e.g. "Ordering"]'
 metadata:

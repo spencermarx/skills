@@ -71,3 +71,20 @@
       value: domain-modeling
     - type: not-skill-used
       value: ubiquitous-language
+- description: the language, named by its phrase
+  vars:
+    query: pin down the ubiquitous language for billing
+  assert:
+    - type: skill-used
+      value: domain-modeling
+    - type: not-skill-used
+      value: ubiquitous-language
+- description: the glossary file's format, with no judgment asked
+  vars:
+    query: our GLOSSARY.md has drifted from the standard format; restructure it so
+      every entry has the usual sections
+  assert:
+    - type: skill-used
+      value: ubiquitous-language
+    - type: not-skill-used
+      value: domain-modeling
