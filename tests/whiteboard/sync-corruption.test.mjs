@@ -29,7 +29,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { SERVER_DIR, sandbox, startServer, stopServer, stopAllServers } from './harness.mjs';
+import { CANVAS_KEY, SERVER_DIR, sandbox, startServer, stopServer, stopAllServers } from './harness.mjs';
 
 const SB = sandbox('sync-corruption');
 // ws comes from the skill's server/node_modules: this suite lives outside the skill folder.
@@ -179,7 +179,7 @@ class FakeCanvas {
   }
 
   connectEvents() {
-    this.ev = new WsClient(`ws://127.0.0.1:${this.port}/events?role=agent`);
+    this.ev = new WsClient(`ws://127.0.0.1:${this.port}/events?role=agent&canvasKey=${CANVAS_KEY}`);
     this.ev.on('message', (raw) => { try { this.handleFrame(JSON.parse(raw.toString())); } catch { /* ignore */ } });
     // A server-driven recovery reloads the canvas by dropping this socket; a real page would come
     // back with a fresh, uncorrupted store. Mirror that: rebuild the store + sync client + socket.

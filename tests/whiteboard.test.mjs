@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,8 +48,44 @@ test("whiteboard.sh: not installed is exit 3 with the commands it would run", ()
   assert.match(status.stdout, /playwright install chromium/);
   assert.ok(status.stdout.includes(copy), "installs into the writable skill folder");
   assert.equal(sh("path").status, 3);
-  assert.equal(sh("start", "--board", join(copy, "x.tldr")).status, 3);
-  assert.equal(sh("start").status, 2, "start needs --board");
+  assert.equal(sh("start", "--name", "x").status, 3);
+  assert.equal(sh("start").status, 2, "start needs --board or --name");
+});
+
+test("whiteboard.sh status: exit 1, not 3, when Node.js is missing", () => {
+  const { copy, repo } = bareSkill();
+  const bin = mkdtempSync(join(tmpdir(), "whiteboard-no-node-"));
+  const dirnameTool = spawnSync("bash", ["-c", "command -v dirname"], { encoding: "utf8" }).stdout.trim();
+  symlinkSync(dirnameTool, join(bin, "dirname"));
+  const status = spawnSync("/bin/bash", [join(copy, "scripts", "whiteboard.sh"), "status", "--repo", repo], { encoding: "utf8", env: { PATH: bin } });
+  assert.equal(status.status, 1, `${status.stdout}${status.stderr}`);
+  assert.match(status.stderr, /node and npm are required/);
+});
+
+test("whiteboard.sh start: a board outside the repository is refused before anything is created", () => {
+  const { copy, repo, sh } = bareSkill();
+  const outside = join(copy, "elsewhere", "deeper", "x.tldr");
+  for (const args of [["start"], ["start", "--detach"], ["locate"]]) {
+    const run = sh(...args, "--board", outside);
+    assert.equal(run.status, 2, `${args.join(" ")}: ${run.stderr}`);
+    assert.match(run.stderr, /outside the repository/);
+  }
+  assert.ok(!existsSync(join(copy, "elsewhere")), "no folder was created outside the repository");
+  assert.ok(!existsSync(join(repo, ".scratchpad")), "nor the boards folder");
+});
+
+test("whiteboard.sh start: in a repository with no scratch folder, it creates the boards folder and the board's log", () => {
+  for (const detach of [[], ["--detach"]]) {
+    const { repo, sh } = bareSkill();
+    assert.ok(!existsSync(join(repo, ".scratchpad")));
+    const start = sh("start", "--name", "First Board", ...detach);
+    assert.equal(start.status, 3, `start ${detach.join(" ")}: ${start.stdout}${start.stderr}`);
+    assert.match(start.stderr, /not installed/, "the caller is told what is missing");
+    const where = JSON.parse(sh("locate", "--name", "First Board").stdout);
+    assert.equal(where.board, join(realpathSync(repo), ".scratchpad", "whiteboard", "First-Board.tldr"), "--name resolves through the slug rule");
+    assert.ok(existsSync(where.log), `the board's log exists after start ${detach.join(" ")}`);
+    assert.match(readFileSync(where.log, "utf8"), /not installed/, "and says what is missing");
+  }
 });
 
 test("whiteboard.sh: a read-only skill folder installs into the scratch folder", () => {

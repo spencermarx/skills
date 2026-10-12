@@ -136,7 +136,7 @@ async function main() {
     ok(fs.existsSync(lockPath), `lockfile ${b}.lock written`);
     const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
     eq(lock.port, port, `${b}.lock port matches the bound port`);
-    eq(lock.board, ROOM[b], `${b}.lock board is the room id derived from the board's path`);
+    eq(lock.room, ROOM[b], `${b}.lock room is the room id derived from the board's path`);
     eq(lock.path, SB.board(b), `${b}.lock path is the board's canonical path`);
     eq(lock.name, b, `${b}.lock name is the board's display name`);
     ok(Number.isInteger(lock.pid) && isAlive(lock.pid), `${b}.lock pid is a live process (the attach liveness key)`);

@@ -2,7 +2,7 @@
 // BRIDGE CONTRACT (app ↔ Node bridge + sync server) — the seam the bridge
 // builder must match. See SPEC.md §3/§4/§5/§6/§7.
 //
-// One Node process serves three things on the SAME origin (http://127.0.0.1:5179):
+// One Node process serves three things on the SAME origin (http://127.0.0.1:<port>):
 //   1. app/dist static  at /
 //   2. the sync server  at /sync/<room>   (WS; @tldraw/sync-core TLSocketRoom,
 //      one room per board — this is where the board itself lives + persists)
@@ -13,7 +13,7 @@
 //   ?role=human|agent   (default human)   which surface this instance is
 //   ?room=<slug>        (default board)   which sync room to join
 // The bridge launches the headless render-canvas (Playwright) with
-//   ?role=agent&room=<slug>  and opens the operator's browser with
+//   ?role=agent&room=<slug>&canvasKey=<per-process secret>  and opens the operator's browser with
 //   ?role=human&room=<slug>.
 //
 // ── SYNC (v3) ────────────────────────────────────────────────────────────────
@@ -140,35 +140,27 @@ export function readAuthor(): { name: string; authorKey?: string } {
 // Base-URL derivation (SPEC §3 / §8.3 build constraint). The bridge serves this
 // app SAME-ORIGIN on an OS-assigned ephemeral port, so the HTTP base is
 // `window.location.origin` and the WS base is the ws(s):// equivalent of
-// `window.location.host` — NEVER a hardcoded port. The single exception is the
-// Vite dev server (`import.meta.env.DEV`), where the app runs on its own port and
-// the bridge is reached at a fixed localhost dev port.
-const DEV_BRIDGE_HOST = '127.0.0.1:5179'
-
-function isDev(): boolean {
-  return typeof import.meta !== 'undefined' && Boolean(import.meta.env?.DEV)
-}
-
-// HTTP origin of the bridge (no trailing slash). Served case: window.location.origin.
+// `window.location.host`, never a hardcoded port. There is no separate dev
+// server: the bridge refuses every request that is not from its own page, so the
+// app only ever runs as the bridge serves it. To iterate, rebuild
+// (`npm run build`) and reload the board.
 function httpOrigin(): string {
-  if (isDev()) return `http://${DEV_BRIDGE_HOST}`
-  if (typeof location !== 'undefined' && location.origin) return location.origin
-  return `http://${DEV_BRIDGE_HOST}`
+  return location.origin
 }
 
 // WS origin of the bridge (ws://host or wss://host), protocol matched to the page.
 function wsOrigin(): string {
-  if (isDev()) return `ws://${DEV_BRIDGE_HOST}`
-  if (typeof location !== 'undefined' && location.host) {
-    return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`
-  }
-  return `ws://${DEV_BRIDGE_HOST}`
+  return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`
 }
 
 // The bridge control-channel WS. Tag the socket with role + room so the bridge
 // routes exec/presence to the render-canvas and agent-message to the operator.
+// The render-canvas also passes on the `canvasKey` its URL carries: the bridge
+// gives the role=agent slot only to the page it launched itself.
 export function wsUrl(role: Role, room: string): string {
-  const q = `role=${encodeURIComponent(role)}&room=${encodeURIComponent(room)}`
+  let q = `role=${encodeURIComponent(role)}&room=${encodeURIComponent(room)}`
+  const canvasKey = role === 'agent' ? new URLSearchParams(location.search).get('canvasKey') : null
+  if (canvasKey) q += `&canvasKey=${encodeURIComponent(canvasKey)}`
   return `${wsOrigin()}/events?${q}`
 }
 

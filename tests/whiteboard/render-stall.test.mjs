@@ -26,7 +26,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
-import { SERVER_DIR, sandbox, startServer, stopAllServers } from './harness.mjs';
+import { CANVAS_KEY, SERVER_DIR, sandbox, startServer, stopAllServers } from './harness.mjs';
 
 // ws comes from the skill's server/node_modules: this suite lives outside the skill folder.
 const { WebSocket } = createRequire(path.join(SERVER_DIR, 'package.json'))('ws');
@@ -62,7 +62,7 @@ const canvasStatus = (port) => fetch(`http://127.0.0.1:${port}/canvas-status`).t
 // A FAKE render-canvas: a ws client joined as role=agent. Its response to each export-image frame is
 // governed by the mutable `behavior` (id, ws) => void|Promise, so a single socket drives every phase.
 async function fakeRenderCanvas(port) {
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/events?role=agent`);
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/events?role=agent&canvasKey=${CANVAS_KEY}`);
   const rc = { ws, behavior: null, lastExportId: null };
   ws.on('message', async (raw) => {
     let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }

@@ -47,13 +47,19 @@ export function sandbox(label) {
   return { root, home, board, room, files, env: { WHITEBOARD_REPO: root, WHITEBOARD_HOME: home } };
 }
 
+// The render-canvas key every suite server is started with, so a suite's stand-in render-canvas
+// can take the role=agent /events slot: `/events?role=agent&canvasKey=${CANVAS_KEY}`.
+export const CANVAS_KEY = 'suite-canvas-key';
+
 // Start a bridge on `boardPath` with the render-canvas skipped. `server.port` resolves once it is
 // listening; `server.exited` resolves with {code, signal} when it exits; `server.output` is its log.
 export function startServer(sb, boardPath, extraEnv = {}) {
   const child = spawn(TSX, ['index.ts'], {
     cwd: SERVER_DIR,
     detached: true,
-    env: { ...process.env, PORT: '0', WHITEBOARD_NO_CANVAS: '1', ...sb.env, WHITEBOARD_BOARD: boardPath, ...extraEnv },
+    env: {
+      ...process.env, PORT: '0', WHITEBOARD_NO_CANVAS: '1', WHITEBOARD_CANVAS_KEY: CANVAS_KEY, ...sb.env, WHITEBOARD_BOARD: boardPath, ...extraEnv,
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   spawned.push(child);

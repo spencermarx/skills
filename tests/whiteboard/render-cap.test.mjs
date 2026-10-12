@@ -27,7 +27,7 @@
 
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { SERVER_DIR, sandbox, startServer, stopAllServers } from './harness.mjs';
+import { CANVAS_KEY, SERVER_DIR, sandbox, startServer, stopAllServers } from './harness.mjs';
 
 // ws comes from the skill's server/node_modules: this suite lives outside the skill folder.
 const { WebSocket } = createRequire(path.join(SERVER_DIR, 'package.json'))('ws');
@@ -71,7 +71,7 @@ async function uploadPng(port, id, bytes) {
 // A FAKE render-canvas that records every export-image frame it receives (frame, incl. bounds) and
 // runs a mutable `behavior` to decide how — if at all — to answer.
 async function fakeRenderCanvas(port) {
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/events?role=agent`);
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/events?role=agent&canvasKey=${CANVAS_KEY}`);
   const rc = { ws, behavior: null, frames: [] };
   ws.on('message', async (raw) => {
     let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }

@@ -6,17 +6,24 @@
 #   whiteboard.sh status  [--repo DIR] [--scratch DIR]   is it installed, and where
 #   whiteboard.sh install [--repo DIR] [--scratch DIR]   install it (no prompt: ask first)
 #   whiteboard.sh path    [--repo DIR] [--scratch DIR]   print the runtime dir, or fail
-#   whiteboard.sh locate  --board FILE [--repo DIR] [--scratch DIR]
+#   whiteboard.sh locate  (--board FILE | --name NAME) [--repo DIR] [--scratch DIR]
 #                                                        print the board's identity and live lock
-#   whiteboard.sh start   --board FILE [--repo DIR] [--scratch DIR]
-#                                                        run the board's server in the foreground
+#   whiteboard.sh start   (--board FILE | --name NAME) [--detach] [--repo DIR] [--scratch DIR]
+#                                                        run the board's server (--detach: in the
+#                                                        background; wait until it is live)
 #
 # Boards: the boards folder is <repo>/<scratch>/whiteboard/. A board is its .tldr file, anywhere
 # in the repository; its room id derives from the file's canonical path, and its lock, chat log,
-# render and server log always live in the boards folder, named by that room id. `locate` prints
-# {board, name, room, lock, messages, png, log, live} as JSON, where `live` is the lock of a
-# running server that holds the board, else null. `start` refuses (exit 4) a board a live server
-# already holds; attach to that server instead.
+# render and server log always live in the boards folder, named by that room id. `--name NAME`
+# names the board <boards folder>/<slug of NAME>.tldr, by the same slug rule the panel's "new
+# board" uses. `locate` prints {board, name, room, lock, messages, png, log, live} as JSON, where
+# `live` is the lock of a running server that holds the board, else null.
+#
+# `start` refuses a board outside the repository and the boards folder before it creates anything,
+# then creates the boards folder and appends all further output to the board's log. It refuses a
+# board a live server already holds; attach to that server instead. `start --detach` starts the
+# server in the background, detached from the caller, waits until it is live, and prints the
+# board's `locate` JSON; on a failure it prints the end of the board's log.
 #
 # Runtime location, in order of preference:
 #   1. this skill's own folder (app/ and server/), when it is writable;
@@ -26,9 +33,15 @@
 # lockfiles and the app was built from its current sources, so a skill update asks for a fresh
 # install; `install` then redoes only the steps that are stale.
 #
-# Exit codes: 0 installed (status/path), located, install succeeded, or the server exited
-# cleanly; 3 not installed (status prints what install would run); 4 the board is already live
-# (start); 2 a bad argument; 1 a precondition failed or the server refused the board, on stderr.
+# Exit codes:
+#   0  installed (status, path); installed (install); located (locate, live or not); the board is
+#      live (start --detach, its locate JSON on stdout); the server exited cleanly (start)
+#   1  a precondition failed (Node.js or npm missing or too old), the server could not load the
+#      board, or a detached server did not come up (the end of its log is on stderr)
+#   2  a bad argument, or a board that is not a .tldr file inside the repository or the boards
+#      folder, or whose folder does not exist (refused before anything is created)
+#   3  not installed (status prints what install would run; start refuses)
+#   4  the board is already live (start); attach to the server its JSON names
 #
 # Never prompts. The skill asks the person before calling `install`: it downloads the npm
 # packages and Playwright's Chromium (about 150 MB).
@@ -40,9 +53,11 @@ readonly SCRIPT_DIR
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 readonly SKILL_DIR
 readonly MIN_NODE="22.12.0"
+# How long `start --detach` waits for the server to come up.
+readonly DETACH_WAIT_S="${WHITEBOARD_START_WAIT_S:-60}"
 
 usage() {
-  sed -n '3,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '3,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
 
@@ -53,11 +68,15 @@ shift
 repo=""
 scratch=".scratchpad"
 board=""
+name=""
+detach=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) repo="${2:?--repo needs a directory}"; shift 2 ;;
     --scratch) scratch="${2:?--scratch needs a directory}"; shift 2 ;;
     --board) board="${2:?--board needs a file}"; shift 2 ;;
+    --name) name="${2:?--name needs a board name}"; shift 2 ;;
+    --detach) detach=1; shift ;;
     -h | --help) usage ;;
     *) echo "whiteboard.sh: unknown argument: $1" >&2; usage ;;
   esac
@@ -76,17 +95,37 @@ esac
 readonly FALLBACK_DIR="$scratch_dir/whiteboard-runtime"
 readonly BOARDS_DIR="$scratch_dir/whiteboard"
 
-need_board() { # a --board that names a .tldr file
-  [ -n "$board" ] || { echo "whiteboard.sh: $cmd needs --board <path to the board's .tldr>" >&2; exit 2; }
-  case "$board" in
-    *.tldr) ;;
-    *) echo "whiteboard.sh: a board is a .tldr file, not $board" >&2; exit 2 ;;
-  esac
+need_board() { # exactly one of --board (a .tldr file) and --name
+  if [ -n "$board" ] && [ -n "$name" ]; then
+    echo "whiteboard.sh: $cmd takes --board or --name, not both" >&2; exit 2
+  fi
+  [ -n "$board" ] || [ -n "$name" ] || {
+    echo "whiteboard.sh: $cmd needs --board <path to the board's .tldr> or --name <board name>" >&2; exit 2
+  }
+  if [ -n "$board" ]; then
+    case "$board" in
+      *.tldr) ;;
+      *) echo "whiteboard.sh: a board is a .tldr file, not $board" >&2; exit 2 ;;
+    esac
+  fi
 }
 
-locate_board() { # the board's identity as JSON; exit 0, or 4 when a live server holds it
-  command -v node >/dev/null 2>&1 || { echo "whiteboard.sh: node is required" >&2; exit 1; }
-  node "$SKILL_DIR/server/boards.mjs" "$board" "$BOARDS_DIR"
+need_node() {
+  command -v node >/dev/null 2>&1 || { echo "whiteboard.sh: node is required. Install Node.js (>= $MIN_NODE), then retry." >&2; exit 1; }
+}
+
+# The board's identity as JSON (boards.mjs). Exit 0, 4 when a live server holds it, or 2 when it
+# is not a board inside the repository or the boards folder. Creates nothing.
+locate_board() {
+  if [ -n "$board" ]; then
+    node "$SKILL_DIR/server/boards.mjs" --board "$board" --home "$BOARDS_DIR" --repo "$repo"
+  else
+    node "$SKILL_DIR/server/boards.mjs" --name "$name" --home "$BOARDS_DIR" --repo "$repo"
+  fi
+}
+
+json_field() { # json_field <json> <field>
+  node -e 'process.stdout.write(String(JSON.parse(process.argv[1])[process.argv[2]] ?? ""))' "$1" "$2"
 }
 
 sources_hash() { # one hash over a runtime's app/ and server/ sources, build output and deps excluded
@@ -161,8 +200,11 @@ run_step() {
   fi
 }
 
+readonly NOT_INSTALLED="whiteboard.sh: the whiteboard runtime is not installed. Run: whiteboard.sh status"
+
 case "$cmd" in
   status)
+    check_node || exit 1
     if dir="$(current_install)"; then
       echo "installed: $dir"
       exit 0
@@ -175,12 +217,11 @@ case "$cmd" in
     fi
     echo "install would run:"
     install_commands "$target"
-    check_node || true
     exit 3
     ;;
   path)
     current_install || {
-      echo "whiteboard.sh: the whiteboard runtime is not installed. Run: whiteboard.sh status" >&2
+      echo "$NOT_INSTALLED" >&2
       exit 3
     }
     ;;
@@ -217,10 +258,13 @@ case "$cmd" in
     ;;
   locate)
     need_board
-    locate_board || [ $? -eq 4 ]
+    need_node
+    locate_board || { rc=$?; [ "$rc" -eq 4 ] || exit "$rc"; }
     ;;
   start)
     need_board
+    need_node
+    # 1. Refuse a board outside the repository (exit 2) or one already live (exit 4), creating nothing.
     where="$(locate_board)" && rc=0 || rc=$?
     if [ "$rc" -eq 4 ]; then
       echo "whiteboard.sh: this board is already live; attach to it instead of starting another server:" >&2
@@ -228,14 +272,49 @@ case "$cmd" in
       exit 4
     fi
     [ "$rc" -eq 0 ] || exit "$rc"
-    dir="$(current_install)" || {
-      echo "whiteboard.sh: the whiteboard runtime is not installed. Run: whiteboard.sh status" >&2
-      exit 3
-    }
-    mkdir -p "$(dirname "$board")" "$BOARDS_DIR"
-    board="$(cd "$(dirname "$board")" && pwd -P)/$(basename "$board")"
+    board="$(json_field "$where" board)"
+    log="$(json_field "$where" log)"
+    # 2. Create the boards folder, so the board's log has somewhere to go.
+    mkdir -p "$BOARDS_DIR"
+    if [ "$detach" -eq 1 ]; then
+      # 3. The runtime check, said in the log and to the caller.
+      current_install >/dev/null || { echo "$NOT_INSTALLED" | tee -a "$log" >&2; exit 3; }
+      # 4. The server, in the background with every stream away from the caller's, so it outlives
+      #    the caller and the caller's own command returns. It appends to the board's log itself.
+      nohup bash "$SCRIPT_DIR/whiteboard.sh" start --board "$board" --repo "$repo" --scratch "$scratch" \
+        </dev/null >/dev/null 2>&1 &
+      child=$!
+      # 5. Wait until the board is live, then print its locate JSON.
+      deadline=$((SECONDS + DETACH_WAIT_S))
+      while [ "$SECONDS" -lt "$deadline" ]; do
+        where="$(locate_board)" && rc=0 || rc=$?
+        if [ "$rc" -eq 4 ]; then echo "$where"; exit 0; fi
+        if [ -n "$child" ] && ! kill -0 "$child" 2>/dev/null; then
+          code=0; wait "$child" || code=$?
+          child=""
+          # Exit 4: another server took the board first. Wait for it to come up and attach.
+          if [ "$code" -ne 4 ]; then
+            echo "whiteboard.sh: the server exited (code $code) before it was live. The end of $log:" >&2
+            tail -n 20 "$log" >&2 || true
+            [ "$code" -ne 0 ] && exit "$code"
+            exit 1
+          fi
+        fi
+        sleep 0.5
+      done
+      echo "whiteboard.sh: the server was not live after ${DETACH_WAIT_S}s. The end of $log:" >&2
+      tail -n 20 "$log" >&2 || true
+      exit 1
+    fi
+    # 3. From here every line goes to the board's log; a refusal is also said to the caller.
+    exec 3>&2
+    exec >>"$log" 2>&1
+    echo "--- whiteboard.sh start, $(date -u +%Y-%m-%dT%H:%M:%SZ): $board"
+    dir="$(current_install)" || { echo "$NOT_INSTALLED"; echo "$NOT_INSTALLED" >&3; exit 3; }
+    exec 3>&-
     cd "$dir/server"
-    # The server repeats the live-lock check itself, which also covers a race with another start.
+    # The server claims the board's lock exclusively before it listens, so of two starts racing
+    # on one board exactly one serves it; the other exits 4.
     PORT="${PORT:-0}" WHITEBOARD_REPO="$repo" WHITEBOARD_HOME="$BOARDS_DIR" WHITEBOARD_BOARD="$board" \
       exec "$dir/server/node_modules/.bin/tsx" index.ts
     ;;

@@ -32,7 +32,8 @@ import { TLSocketRoom } from '@tldraw/sync-core';
 import { chromium, type Browser, type Page } from 'playwright';
 import { PresenceManager, type PresenceState } from './presence.js';
 import {
-  canonicalBoardPath, displayName, isRoomId, isWithin, liveOwner, readLock, roomIdFor, sidecarPaths,
+  canonicalBoardPath, claimLock, displayName, isRoomId, placementRefusal, pidAlive, readLock, roomIdFor,
+  sidecarPaths, slugFor, updateLock,
 } from './boards.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -103,6 +104,9 @@ const APP_DIST = path.resolve(__dirname, '..', 'app', 'dist');
 // A headless-test affordance: no Playwright render-canvas, at boot or on a board switch, so the
 // bridge runs where Chromium is not installed. The skill never sets it.
 const NO_CANVAS = !!process.env.WHITEBOARD_NO_CANVAS;
+// A per-process secret the render-canvas's URL carries, so no other page can take its /events slot.
+// WHITEBOARD_CANVAS_KEY sets it for the tests' stand-in canvases; the skill never sets it.
+const CANVAS_KEY = process.env.WHITEBOARD_CANVAS_KEY || randomUUID();
 
 // --- repo root + scratchpad home (SPEC §8) ---------------------------------
 function findRepoRoot(start: string): string {
@@ -120,7 +124,8 @@ function findRepoRoot(start: string): string {
 // working directory; the boards folder is WHITEBOARD_HOME, else <repository>/.scratchpad/whiteboard.
 // scripts/whiteboard.sh start sets both. New boards are created in the boards folder, and EVERY
 // board's own files (lock, chat log, render) live there, wherever its .tldr is, so nothing but the
-// board itself is ever written into a tracked folder.
+// board itself is left in a tracked folder: each save's temp file lives there only until it is
+// renamed over the board, and one a crash left is swept when the board next loads.
 const REPO_ROOT = canonicalBoardPath(process.env.WHITEBOARD_REPO ? path.resolve(process.env.WHITEBOARD_REPO) : findRepoRoot(process.cwd()));
 const homeDir = process.env.WHITEBOARD_HOME ? path.resolve(process.env.WHITEBOARD_HOME) : path.join(REPO_ROOT, '.scratchpad', 'whiteboard');
 fs.mkdirSync(homeDir, { recursive: true });
@@ -140,16 +145,16 @@ const boardsByRoom = new Map<string, Board>();
 const joinable = (b: Board): Board => (boardsByRoom.set(b.room, b), b);
 
 // [B2/SF3] A path a request names: relative paths resolve against the repository; the file must
-// be a .tldr inside the repository or the boards folder.
+// be a .tldr inside the repository or the boards folder (boards.mjs's rule), and its folder must
+// already exist, since a board the server could never save is refused rather than lost.
 type BoardPathResult = { ok: true; board: Board } | { ok: false; status: number; error: string };
 function boardFromRequest(raw: unknown): BoardPathResult {
   if (typeof raw !== 'string' || !raw) return { ok: false, status: 400, error: 'a board path is required' };
   const board = boardAt(path.resolve(REPO_ROOT, raw));
-  if (path.extname(board.path).toLowerCase() !== '.tldr') {
-    return { ok: false, status: 400, error: `not a board: ${board.path} (a board is a .tldr file)` };
-  }
-  if (!isWithin(REPO_ROOT, board.path) && !isWithin(HOME, board.path)) {
-    return { ok: false, status: 403, error: `outside the repository: ${board.path}` };
+  const refusal = placementRefusal(board.path, REPO_ROOT, HOME);
+  if (refusal) return { ok: false, status: refusal.startsWith('not a board') ? 400 : 403, error: refusal };
+  if (!fs.existsSync(path.dirname(board.path))) {
+    return { ok: false, status: 400, error: `its folder does not exist: ${path.dirname(board.path)}` };
   }
   return { ok: true, board };
 }
@@ -177,25 +182,31 @@ console.log(`[bridge] boards folder: ${HOME}`);
 console.log(`[bridge] active board: ${activeBoardPath} (room '${activeRoomId}')`);
 
 // --- lockfile: discovery + one-server-per-board guard (SPEC §8.3) [v4] ------
-// `<room>.lock` in the boards folder = { port, pid, board (the room id), path, name, startedAt,
-// ownerSession?, ownerSessionId? }. The next `/whiteboard` for this board finds it through
-// `whiteboard.sh locate` and attaches; it is removed on graceful `/done`/shutdown. Liveness is pid
-// + `/canvas-status`, not the file's presence.
+// `<room>.lock` in the boards folder = { port, pid, room, path, name, startedAt, ownerSession?,
+// ownerSessionId? }. The next `/whiteboard` for this board finds it through `whiteboard.sh locate`
+// and attaches; it is removed on graceful `/done`/shutdown. Liveness is pid + `/canvas-status`, not
+// the file's presence. Holding the lock and hosting the room are one fact: the lock is claimed
+// exclusively (boards.mjs claimLock) before this process serves a board, at boot before `listen`
+// and on a switch before the room changes, and a room switched away from is evicted with its lock.
 const lockPathFor = (roomId: string): string => sidecarPaths(HOME, roomId).lock;
 
-function writeLock(): void {
-  const lock = {
-    port: assignedPort, pid: process.pid, board: activeRoomId, path: activeBoardPath, name: displayName(activeBoardPath),
+function lockContent(board: Board) {
+  return {
+    port: server.listening ? assignedPort : 0, pid: process.pid, room: board.room, path: board.path, name: board.name,
     startedAt: Date.now(),
     ...(OWNER_SESSION ? { ownerSession: OWNER_SESSION } : {}),
     ...(OWNER_SESSION_ID ? { ownerSessionId: OWNER_SESSION_ID } : {}),
   };
-  try {
-    fs.writeFileSync(lockPathFor(activeRoomId), JSON.stringify(lock));
-    console.log(`[bridge] wrote lock ${lockPathFor(activeRoomId)} (port ${assignedPort}, pid ${process.pid})`);
-  } catch (e) {
-    console.warn(`[bridge] lock write failed: ${(e as Error).message}`);
+}
+
+// Claim the lock for `board`. Null when it is ours; otherwise the live (or still starting) holder.
+async function claimBoardLock(board: Board): Promise<{ port: number; pid: number } | null> {
+  const claim = await claimLock(lockPathFor(board.room), board.room, lockContent(board));
+  if (claim.ok) {
+    console.log(`[bridge] claimed lock ${lockPathFor(board.room)} (pid ${process.pid})`);
+    return null;
   }
+  return { port: claim.holder?.port ?? 0, pid: claim.holder?.pid ?? 0 };
 }
 
 // Removes the lock only while it is ours, so a process never deletes another server's lock.
@@ -206,15 +217,6 @@ function removeLock(roomId: string = activeRoomId): void {
   } catch (e) {
     console.warn(`[bridge] lock remove failed: ${(e as Error).message}`);
   }
-}
-
-// [v8 §8.3] Runtime one-server guard, used at boot and when the in-app switcher opens another
-// board (`/board/open`, `/board/new`). Without it a process steals a live board's lock: a
-// split-brain where two processes serve and persist one board, and a parked waiter on one never
-// meets a Send that lands on the other. null: no lock, a stale lock, or the lock is ours.
-async function liveForeignOwner(roomId: string): Promise<{ port: number; pid: number } | null> {
-  const lock = await liveOwner(HOME, roomId, process.pid);
-  return lock ? { port: lock.port, pid: lock.pid } : null;
 }
 
 // ===========================================================================
@@ -261,6 +263,7 @@ function getOrCreateRoom(roomId: string): RoomEntry {
 
   const board = boardsByRoom.get(roomId);
   if (!board) throw new BoardLoadError(`unknown room '${roomId}'`);
+  sweepCrashTemps(board.path);
   const initialSnapshot = readBoardSnapshot(board.path);
 
   const entry: RoomEntry = { room: null as unknown as TLSocketRoom, boardPath: board.path, dirty: false, inflight: null };
@@ -291,6 +294,39 @@ let tempSeq = 0;
 const tempPathFor = (target: string): string =>
   path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.${++tempSeq}.tmp`);
 
+// A write removes its own temp file when it fails, so only a crash leaves one. Loading a board
+// removes this board's temp files whose writer is gone, keeping the board's folder free of anything
+// but the board itself.
+function sweepCrashTemps(boardPath: string): void {
+  const prefix = `.${path.basename(boardPath)}.`;
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(path.dirname(boardPath));
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith(prefix) || !name.endsWith('.tmp')) continue;
+    const pid = Number(name.slice(prefix.length).split('.')[0]);
+    if (Number.isInteger(pid) && pid > 0 && pid !== process.pid && pidAlive(pid)) continue;
+    fs.rmSync(path.join(path.dirname(boardPath), name), { force: true });
+    console.log(`[sync] removed a temp file a crashed write left: ${name}`);
+  }
+}
+
+// A board that cannot be saved is said in the panel once per run of failures, not only in the log.
+const persistFailing = new Set<string>();
+function notePersistResult(roomId: string, entry: RoomEntry, error: Error | null): void {
+  if (!error) {
+    if (persistFailing.delete(roomId)) postSystemMessage(`Saving the board works again: ${entry.boardPath}`);
+    return;
+  }
+  console.warn(`[sync] persist failed for '${roomId}': ${error.message}`);
+  if (persistFailing.has(roomId)) return;
+  persistFailing.add(roomId);
+  postSystemMessage(`The board cannot be saved to ${entry.boardPath} (${error.message}). Export it from the menu until this is fixed; edits since the last save exist only in the open board.`);
+}
+
 async function persistRoom(roomId: string, entry: RoomEntry): Promise<void> {
   entry.dirty = false;
   const body = JSON.stringify(entry.room.getCurrentSnapshot());
@@ -299,10 +335,11 @@ async function persistRoom(roomId: string, entry: RoomEntry): Promise<void> {
     await fsp.writeFile(tmp, body);
     await fsp.rename(tmp, entry.boardPath);
     console.log(`[sync] persisted room '${roomId}' -> ${entry.boardPath}`);
+    notePersistResult(roomId, entry, null);
   } catch (e) {
     entry.dirty = true;
     await fsp.rm(tmp, { force: true }).catch(() => undefined);
-    console.warn(`[sync] persist failed for '${roomId}': ${(e as Error).message}`);
+    notePersistResult(roomId, entry, e as Error);
   }
 }
 
@@ -315,7 +352,7 @@ function persistRoomSync(roomId: string, entry: RoomEntry): void {
     console.log(`[sync] flushed room '${roomId}' -> ${entry.boardPath}`);
   } catch (e) {
     fs.rmSync(tmp, { force: true });
-    console.warn(`[sync] flush failed for '${roomId}': ${(e as Error).message}`);
+    notePersistResult(roomId, entry, e as Error);
   }
 }
 
@@ -568,13 +605,31 @@ type FrameFromApp =
 // ===========================================================================
 // [B1] The bridge accepts only its own clients. Binding 127.0.0.1 does not stop the user's own
 // browser: any page can reach a loopback port, browsers apply no CORS to WebSockets, and a
-// rebinding domain can resolve to 127.0.0.1. So every request must name a loopback Host for this
-// port, and one that carries an Origin (every browser request that can change state does) must be
-// this server's own page. Non-browser clients (curl, poll.sh, presence, the tests) send no Origin.
+// rebinding domain can resolve to 127.0.0.1. Origin alone cannot tell a foreign page from curl:
+// a browser sends no Origin on a no-cors fetch, an <img> or a navigation, and a GET such as
+// /next-instruction changes state. So every request and upgrade passes three checks:
+//   1. Host names this server (127.0.0.1:<port> or localhost:<port>), which stops DNS rebinding.
+//   2. Sec-Fetch-Site, when present, is same-origin (the app's own requests) or none (a typed URL,
+//      a bookmark, the render-canvas's page.goto). Browsers send it on every request; a page on
+//      any other origin sends cross-site, or same-site from another port of 127.0.0.1 or
+//      localhost, and is refused. Non-browser clients (curl, poll.sh, the liveness probe,
+//      presence, the tests) send none.
+//   3. Origin, when present, is this server's own page. A WebSocket handshake always carries one.
+// The app's static files are the one exception to 2 and 3: they are served after the Host check
+// and before the rest (below), so a link to a board from anywhere still loads the app, whose own
+// requests are then same-origin. Every API route and socket sits behind all three.
 const ownHosts = (): string[] => [`127.0.0.1:${assignedPort}`, `localhost:${assignedPort}`];
-function clientRefusal(headers: http.IncomingHttpHeaders): string | null {
+function hostRefusal(headers: http.IncomingHttpHeaders): string | null {
   const host = (headers.host ?? '').toLowerCase();
-  if (!ownHosts().includes(host)) return `Host '${headers.host ?? ''}' is not this server`;
+  return ownHosts().includes(host) ? null : `Host '${headers.host ?? ''}' is not this server`;
+}
+function clientRefusal(headers: http.IncomingHttpHeaders): string | null {
+  const hostProblem = hostRefusal(headers);
+  if (hostProblem) return hostProblem;
+  const site = headers['sec-fetch-site'];
+  if (site !== undefined && site !== 'same-origin' && site !== 'none') {
+    return `a request from another site (Sec-Fetch-Site: ${site}) is not this server's own page`;
+  }
   const origin = headers.origin;
   if (origin !== undefined && !ownHosts().some((h) => origin.toLowerCase() === `http://${h}`)) {
     return `Origin '${origin}' is not this server`;
@@ -582,16 +637,23 @@ function clientRefusal(headers: http.IncomingHttpHeaders): string | null {
   return null;
 }
 
+function refuseWith(check: (h: http.IncomingHttpHeaders) => string | null) {
+  return (req: Request, res: Response, next: () => void): void => {
+    const refusal = check(req.headers);
+    if (refusal) {
+      console.warn(`[bridge] refused ${req.method} ${req.url}: ${refusal}`);
+      res.status(403).json({ error: refusal });
+      return;
+    }
+    next();
+  };
+}
+
 const app = express();
-app.use((req: Request, res: Response, next: () => void) => {
-  const refusal = clientRefusal(req.headers);
-  if (refusal) {
-    console.warn(`[bridge] refused ${req.method} ${req.url}: ${refusal}`);
-    res.status(403).json({ error: refusal });
-    return;
-  }
-  next();
-});
+app.use(refuseWith(hostRefusal));
+// GET and HEAD only; a miss falls through to the full check, so no API path is served from here.
+app.use(express.static(APP_DIST));
+app.use(refuseWith(clientRefusal));
 app.use(express.json({ limit: '32mb' }));
 app.use((req: Request, _res: Response, next: () => void) => {
   console.log(`[bridge] ${req.method} ${req.url}`);
@@ -638,6 +700,13 @@ server.on('upgrade', (req, socket, head) => {
   const pathname = url.pathname;
   if (pathname === '/events') {
     const role = url.searchParams.get('role') ?? 'agent';
+    // The render-canvas slot drives every agent's exec, shapes and image, so it needs the key only
+    // this server's own Playwright page is given (canvasUrl). A page any site navigates to
+    // /?role=agent loads the app same-origin, but cannot know the key.
+    if (role !== 'human' && url.searchParams.get('canvasKey') !== CANVAS_KEY) {
+      refuseUpgrade(socket, 403, 'the render-canvas socket needs this server\'s canvas key');
+      return;
+    }
     eventsWss.handleUpgrade(req, socket, head, (ws) => onEventsConnection(ws, role));
   } else if (pathname.startsWith('/sync/')) {
     let roomId: string;
@@ -2401,8 +2470,25 @@ app.get('/snapshot', async (req: Request, res: Response) => {
 // ===========================================================================
 // BOARD open / new / discovery (SPEC §8)
 // ===========================================================================
-// Loads the target room BEFORE anything switches, so a board that cannot be loaded leaves this
-// process exactly as it was (throws BoardLoadError).
+// The room this process leaves on a switch is evicted, not kept: flushed if it changed, its peers
+// disconnected, and no longer joinable. Its lock is released afterwards, so a process never gives
+// up the lock of a room it still serves (another server may boot that board the moment it is gone).
+async function evictRoom(roomId: string): Promise<void> {
+  const entry = rooms.get(roomId);
+  rooms.delete(roomId); // first, so the persist timer starts no further write
+  boardsByRoom.delete(roomId);
+  if (entry) {
+    if (entry.inflight) await entry.inflight;
+    if (entry.dirty) persistRoomSync(roomId, entry);
+    entry.room.close();
+  }
+  removeLock(roomId);
+  console.log(`[sync] room '${roomId}' evicted: flushed, its peers disconnected, its lock released`);
+}
+
+// Moves this process onto `board`, whose lock the caller has claimed. Loads the target room BEFORE
+// anything switches, so a board that cannot be loaded leaves this process exactly as it was
+// (throws BoardLoadError).
 async function switchRoom(board: Board): Promise<void> {
   joinable(board);
   try {
@@ -2415,19 +2501,21 @@ async function switchRoom(board: Board): Promise<void> {
   activeRoomId = board.room;
   activeBoardPath = board.path;
   latestImagePath = pngPathFor(board.room);
-  // Keep the lockfile pointing at the board this process actually hosts.
-  if (prevRoom !== board.room) removeLock(prevRoom);
-  writeLock();
+  if (prevRoom !== board.room) await evictRoom(prevRoom);
   presence.switchRoom(board.room); // rebuild agent cursors against the new room
   await navigateRenderCanvas(board.room);
 }
 
-// [v8 §8.3] One server per board. If a live foreign process already hosts the board, DO NOT switch
-// in-process (that would steal its lock -> split-brain). Hand the client that process's port so it
-// attaches there instead. Unowned / stale-locked / our-own-board => switch in-process.
+// [v8 §8.3] One server per board. The board's lock is claimed first: if a live foreign process
+// holds it, DO NOT switch in-process (that would be a split-brain); hand the client that process's
+// port so it attaches there instead. Unowned / stale-locked / our-own-board => switch in-process.
 async function openBoard(board: Board, res: Response, verb: string): Promise<void> {
   const reply = { path: board.path, room: board.room, name: board.name };
-  const owner = await liveForeignOwner(board.room);
+  const owner = await claimBoardLock(board);
+  if (owner && !owner.port) {
+    res.status(409).json({ error: `another server (pid ${owner.pid}) is starting on this board; try again in a moment`, ...reply });
+    return;
+  }
   if (owner) {
     console.log(`[bridge] board ${verb} -> '${board.room}' already live at port ${owner.port} (pid ${owner.pid}); attach, do not steal`);
     res.json({ ok: true, attach: true, port: owner.port, ...reply });
@@ -2436,6 +2524,7 @@ async function openBoard(board: Board, res: Response, verb: string): Promise<voi
   try {
     await switchRoom(board);
   } catch (e) {
+    if (board.room !== activeRoomId) removeLock(board.room);
     if (!(e instanceof BoardLoadError)) throw e;
     console.warn(`[bridge] board ${verb} refused: ${e.message}`);
     res.status(422).json({ error: e.message, ...reply });
@@ -2460,8 +2549,7 @@ app.post('/board/new', async (req: Request, res: Response) => {
     res.status(400).json({ error: 'body.name required' });
     return;
   }
-  const safe = name.replace(/[^\w.-]+/g, '-');
-  await openBoard(boardAt(path.join(HOME, `${safe}.tldr`)), res, 'new');
+  await openBoard(boardAt(path.join(HOME, `${slugFor(name)}.tldr`)), res, 'new');
 });
 
 type BoardListing = { name: string; path: string; room: string; source: 'home' | 'repo' };
@@ -2517,7 +2605,8 @@ let canvasRoom: string | null = null;
 // [render-cap] Re-entry guard for the silent crash-relaunch below.
 let renderCanvasRestarting = false;
 
-const canvasUrl = (roomId: string): string => `http://${HOST}:${assignedPort}/?role=agent&room=${encodeURIComponent(roomId)}`;
+const canvasUrl = (roomId: string): string =>
+  `http://${HOST}:${assignedPort}/?role=agent&room=${encodeURIComponent(roomId)}&canvasKey=${encodeURIComponent(CANVAS_KEY)}`;
 
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -2835,7 +2924,7 @@ async function launchRenderCanvas(roomId: string): Promise<void> {
   page.on('crash', () => { if (canvasPage === page) void handleRenderCanvasDeath('page crashed'); });
   const url = canvasUrl(roomId);
   await page.goto(url, { waitUntil: 'domcontentloaded' });
-  console.log(`[canvas] render-canvas launched at ${url}`);
+  console.log(`[canvas] render-canvas launched on room '${roomId}'`);
   await verifyCanvasSynced(roomId, 'launch');
 }
 
@@ -2848,7 +2937,7 @@ async function navigateRenderCanvas(roomId: string): Promise<void> {
   }
   const url = canvasUrl(roomId);
   await canvasPage.goto(url, { waitUntil: 'domcontentloaded' });
-  console.log(`[canvas] render-canvas navigated to ${url}`);
+  console.log(`[canvas] render-canvas navigated to room '${roomId}'`);
   await verifyCanvasSynced(roomId, 'navigate');
 }
 
@@ -2871,13 +2960,17 @@ async function teardownRenderCanvas(): Promise<void> {
   }
 }
 
-app.get('/canvas-status', (_req: Request, res: Response) => {
+app.get('/canvas-status', (req: Request, res: Response) => {
   const connected = !!(renderCanvasSocket && renderCanvasSocket.readyState === WebSocket.OPEN);
+  const askingSession = typeof req.query.sessionId === 'string' && req.query.sessionId ? req.query.sessionId : null;
   // [v5 §8.6/§11] agentParked = a lead is long-polling right now (a live waiter exists), so a
   // Send lands immediately. When false with pending Sends, nobody is listening — loud, not silent.
   res.json({
     connected,
     agentParked: agentParked(),
+    // With ?sessionId=<sid>: whether THIS session has a lead waiter parked, the check a lead runs
+    // before handing its turn back (agentParked alone is true for any lead waiter).
+    ...(askingSession ? { youParked: waitersFor('lead').some((w) => w.sessionId === askingSession) } : {}),
     // [v9.3 §9 #55] The honest lead-liveness signal (armed listener OR receipt holder within grace).
     // The panel keys the "no one on the board" banner and the lead avatar dim on this, NOT on the
     // transient agentParked, so a normal turn's wake→re-arm gap never reads as "session ended". Always
@@ -2967,22 +3060,25 @@ process.on('uncaughtException', (e) => {
 });
 
 // ===========================================================================
-// Static app + boot
+// Boot (the app's static files are mounted with the client checks, above)
 // ===========================================================================
-app.use('/', express.static(APP_DIST));
-
-// [SF3/B2] Refuse to boot onto a board this process must not host: one outside the repository,
-// one a live server already holds (its lock is never stolen), or one whose file cannot be loaded
-// (it is never overwritten). Each exits before the lock is written or anything is persisted.
+// [SF3/B2] Refuse to boot onto a board this process must not host: one outside the repository or
+// in a folder that does not exist (exit 2), one another server holds or is starting on (its lock is
+// never stolen; exit 4), or one whose file cannot be loaded (it is never overwritten; exit 1). The
+// lock is claimed exclusively before `listen`, so of two servers started at once on one board
+// exactly one boots; a refusal after the claim releases it.
 async function refuseBoot(): Promise<void> {
   const refuse = (code: number, why: string): never => {
+    removeLock(activeRoomId);
     console.error(`[bridge] refusing to boot: ${why}`);
     process.exit(code);
   };
-  if (path.extname(activeBoardPath).toLowerCase() !== '.tldr') refuse(2, `not a board: ${activeBoardPath} (a board is a .tldr file)`);
-  if (!isWithin(REPO_ROOT, activeBoardPath) && !isWithin(HOME, activeBoardPath)) refuse(2, `outside the repository: ${activeBoardPath}`);
-  const owner = await liveForeignOwner(activeRoomId);
-  if (owner) refuse(4, `${activeBoardPath} is already live on port ${owner.port} (pid ${owner.pid}); attach to it instead`);
+  const placement = placementRefusal(activeBoardPath, REPO_ROOT, HOME);
+  if (placement) refuse(2, placement);
+  if (!fs.existsSync(path.dirname(activeBoardPath))) refuse(2, `its folder does not exist: ${path.dirname(activeBoardPath)}`);
+  const owner = await claimBoardLock(bootBoard);
+  if (owner?.port) refuse(4, `${activeBoardPath} is already live on port ${owner.port} (pid ${owner.pid}); attach to it instead`);
+  if (owner) refuse(4, `${activeBoardPath} is being started by another server (pid ${owner.pid}); attach to it once it is live`);
   try {
     getOrCreateRoom(activeRoomId);
   } catch (e) {
@@ -3000,7 +3096,14 @@ server.listen(PORT_OVERRIDE ?? 0, HOST, () => {
   console.log(`[bridge] serving app from ${APP_DIST}`);
   console.log(`[bridge] bridge WS  ws://${HOST}:${assignedPort}/events`);
   console.log(`[sync]   sync   WS  ws://${HOST}:${assignedPort}/sync/:roomId`);
-  writeLock();
+  // The claim recorded port 0 ("starting"); record the real one, which is what makes the board live.
+  const active = { path: activeBoardPath, room: activeRoomId, name: displayName(activeBoardPath) };
+  if (!updateLock(lockPathFor(activeRoomId), lockContent(active))) {
+    console.error('[bridge] refusing to serve: this board\'s lock was taken while the server was starting');
+    void shutdown(4);
+    return;
+  }
+  console.log(`[bridge] wrote lock ${lockPathFor(activeRoomId)} (port ${assignedPort}, pid ${process.pid})`);
   // WHITEBOARD_NO_CANVAS skips the Playwright render-canvas — a headless-test affordance
   // for exercising the bridge (messages, discovery, isolation) without launching Chromium.
   // The skill never sets it, so normal boot always brings the render-canvas up.
