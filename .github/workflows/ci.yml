@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Manifest sync, the portability contract, and the installer tests.
+      - run: npm test
+      # The Claude Code plugin and marketplace schema, as Claude Code itself reads them.
+      - run: npx -y @anthropic-ai/claude-code plugin validate .
+      # Deterministic harness checks from the eval engine, run against this repository.
+      - run: python3 skills/harness/harness-eval/scripts/check_descriptions.py .
+        if: hashFiles('skills/harness/harness-eval/scripts/check_descriptions.py') != ''

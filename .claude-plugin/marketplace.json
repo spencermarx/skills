@@ -1,0 +1,28 @@
+{
+  "name": "aclarify",
+  "owner": {
+    "name": "Spencer Marx",
+    "url": "https://github.com/spencermarx"
+  },
+  "metadata": {
+    "description": "Aclarify's agent skills and tools: the skills catalog and Open Code Review."
+  },
+  "plugins": [
+    {
+      "name": "aclarify-skills",
+      "source": "./",
+      "description": "Agent skills for planning, engineering, writing, strategy and harness craft.",
+      "category": "productivity"
+    },
+    {
+      "name": "ocr",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/spencermarx/open-code-review.git",
+        "path": "packages/agents"
+      },
+      "description": "Open Code Review: multi-agent code review. Needs the ocr CLI; the setup skill installs it.",
+      "category": "development"
+    }
+  ]
+}

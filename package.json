@@ -1,0 +1,27 @@
+{
+  "name": "aclarify-skills",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent skills for real work: planning, engineering, writing, strategy and harness craft. Works in Claude Code, Codex, Copilot, Cursor, OpenCode and any harness that reads SKILL.md.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/spencermarx/skills"
+  },
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "changeset": "changeset",
+    "version": "changeset version && node scripts/sync-manifests.mjs",
+    "sync": "node scripts/sync-manifests.mjs",
+    "check": "node scripts/sync-manifests.mjs --check && node scripts/validate.mjs",
+    "test": "npm run check && node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "@changesets/changelog-github": "^0.5.1",
+    "@changesets/cli": "^2.29.7",
+    "yaml": "^2.8.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

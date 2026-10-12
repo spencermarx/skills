@@ -1,0 +1,35 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+
+concurrency: release
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      # With pending changesets: opens or updates the "version skills" PR.
+      # With none (that PR just merged): tags v<version> and moves `stable` to it.
+      - uses: changesets/action@v1
+        with:
+          version: npm run version
+          publish: node scripts/release.mjs
+          title: "chore: version skills"
+          commit: "chore: version skills"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

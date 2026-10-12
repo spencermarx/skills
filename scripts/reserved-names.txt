@@ -1,0 +1,28 @@
+# Skill names a harness already uses for a built-in command or skill.
+# A bare-name install (npx skills, .agents/skills) of a skill with one of these
+# names shadows the built-in or is shadowed by it. Add to this list; never rename around it silently.
+# Claude Code
+code-review
+review
+security-review
+simplify
+init
+run
+loop
+schedule
+help
+config
+compact
+clear
+memory
+doctor
+status
+model
+agents
+skills
+plugin
+# Codex / Gemini / Copilot
+plan
+diff
+mcp
+tools
