@@ -1,0 +1,4 @@
+# Installed on demand by `scripts/engine.sh install`; never committed.
+node_modules/
+# Generated promptfoo configs, written here so the SDK resolves from node_modules.
+runs/

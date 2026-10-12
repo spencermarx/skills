@@ -1,0 +1,133 @@
+# harness-eval: does it fire for measuring a skill library, and stay quiet for the
+# work around it?
+#
+# The thieves are the skills a measurement question sits next to: rewriting the
+# skill under test (no catalog skill owns that, so those cases only assert
+# harness-eval stays quiet), root-causing a failure (`first-principles-investigation`),
+# CI work (`watch-ci`), and generating a script for a human (`wizard`).
+#
+# No baseline yet: the first run of this file establishes one.
+#
+# Run from the catalog root (costs money; see the harness-eval skill):
+#
+#   bash skills/harness/harness-eval/scripts/run.sh --skills skills evals/cases/harness-eval.yaml --repeat 3
+
+# ---------------------------------------------------------------------------
+# Should fire.
+# ---------------------------------------------------------------------------
+
+- description: the plainest phrasing, straight from the description
+  vars:
+    query: run the routing evals for the grill-me skill and tell me how often it fires
+  assert:
+    - type: skill-used
+      value: harness-eval
+
+- description: a wrong-skill complaint, which is exactly what routing cases measure
+  vars:
+    query: I said "wrap this up for tomorrow" and scratchpad fired instead of handoff. Measure whether that keeps happening.
+  assert:
+    - type: skill-used
+      value: harness-eval
+    - type: not-skill-used
+      value: handoff
+
+- description: a description-quality question with the description pasted in
+  vars:
+    query: >-
+      is this description any good at getting the skill picked? "A utility for
+      changelog-related operations and transformations."
+  assert:
+    - type: skill-used
+      value: harness-eval
+
+- description: writing the cases, not running them
+  vars:
+    query: write routing cases for watch-ci, with near-misses that should go somewhere else
+  assert:
+    - type: skill-used
+      value: harness-eval
+    - type: not-skill-used
+      value: watch-ci
+
+- description: an inventory question that only the census answers
+  vars:
+    query: how many of our skills are human-invoked, and how big is the always-on description budget?
+  assert:
+    - type: skill-used
+      value: harness-eval
+
+- description: the description cap, phrased as a worry
+  vars:
+    query: pretty sure some of our skill descriptions blow past the 1024 char limit copilot truncates at, check them all
+  assert:
+    - type: skill-used
+      value: harness-eval
+
+- description: Claude Code rule glob reach, the Claude-specific static check
+  vars:
+    query: our .claude/rules markdown rule seems to load on every file under third_party/, check the glob reach
+  assert:
+    - type: skill-used
+      value: harness-eval
+
+- description: casual and oblique, after an edit
+  vars:
+    query: i reworded the handoff triggers, did that actually help or did i just move words around
+  assert:
+    - type: skill-used
+      value: harness-eval
+    - type: not-skill-used
+      value: handoff
+
+# ---------------------------------------------------------------------------
+# Near-misses. Each sits one step from a real trigger.
+# ---------------------------------------------------------------------------
+
+- description: rewriting the skill under test, which the description routes away from
+  vars:
+    query: rewrite the handoff skill's description so it triggers more often
+  assert:
+    - type: not-skill-used
+      value: harness-eval
+
+- description: authoring a new skill, not measuring one
+  vars:
+    query: write a new skill that formats our changelog entries
+  assert:
+    - type: not-skill-used
+      value: harness-eval
+
+- description: an unexplained test failure, which is a root-cause investigation
+  vars:
+    query: the parser test fails about one run in five and passes on retry, find the real cause
+  assert:
+    - type: not-skill-used
+      value: harness-eval
+    - type: skill-used
+      value: first-principles-investigation
+
+- description: CI status, a different kind of check
+  vars:
+    query: is CI green yet on PR 88?
+  assert:
+    - type: not-skill-used
+      value: harness-eval
+    - type: skill-used
+      value: watch-ci
+
+- description: a script for a human, the other harness skill
+  vars:
+    query: make me an interactive script that walks me through creating the Stripe keys and adding them as GitHub secrets
+  assert:
+    - type: not-skill-used
+      value: harness-eval
+    - type: skill-used
+      value: wizard
+
+- description: evaluating a model's answers, not a skill library's routing
+  vars:
+    query: set up an LLM-as-judge eval for our support bot's answers
+  assert:
+    - type: not-skill-used
+      value: harness-eval

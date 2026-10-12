@@ -1,0 +1,79 @@
+# The paired fixture. Proves a trigger eval can discriminate between two
+# descriptions of one capability, before anyone believes a number it reports
+# about a real skill. From the catalog root:
+#
+#   bash skills/harness/harness-eval/scripts/run.sh \
+#     --skills tests/harness-eval/fixtures/skills \
+#     tests/harness-eval/fixtures/widget-forge.yaml --repeat 3
+#
+# This is a head-to-head inside one library, not two independent runs. `--skills`
+# copies all three fixtures into one sandbox, so every query below is answered by
+# an agent that can see `widget-forge-a`, `widget-forge-b` and `widget-inspect` at
+# once and picks between them. Each positive case therefore asserts on both arms:
+# the pushy description fires and the weak one stays quiet. One assertion would
+# leave the weak arm unobserved and the suite would yield a single rate with
+# nothing to compare it against.
+#
+# `widget-forge-a` and `widget-forge-b` cover the same capability, and after the
+# renames and the stripping of their bodies the frontmatter description is the
+# only place they still differ. What the design measures is which of the two a
+# model reaches for when both are in front of it.
+#
+# The discriminating result is `widget-forge-b` taking the positives while
+# `widget-forge-a` does not. A run where `widget-forge-a` takes them, or where
+# neither fires, is the finding: it says the instrument is not reading
+# description quality, and nothing it reports about a real skill should be
+# believed until that is understood.
+
+- description: the plainest possible phrasing
+  vars:
+    query: forge me a widget from this raw stock
+  assert:
+    - type: skill-used
+      value: widget-forge-b
+    - type: not-skill-used
+      value: widget-forge-a
+
+- description: a complaint rather than a request, which is how people actually talk
+  vars:
+    query: this widget came out bent, can you sort it
+  assert:
+    - type: skill-used
+      value: widget-forge-b
+    - type: not-skill-used
+      value: widget-forge-a
+
+- description: names the artifact but not the verb
+  vars:
+    query: I need a finished widget by the end of the day
+  assert:
+    - type: skill-used
+      value: widget-forge-b
+    - type: not-skill-used
+      value: widget-forge-a
+
+# The near miss. `widget-forge-b` routes away from this query by name, so the
+# sibling it names has to exist for the case to test anything: routing away to a
+# skill that is absent leaves the query with nowhere to land and the case passes
+# on the model simply doing nothing.
+- description: the negative routing case the pushy description states explicitly
+  vars:
+    query: just tell me what this widget is made of, do not change it
+  assert:
+    - type: skill-used
+      value: widget-inspect
+    - type: not-skill-used
+      value: widget-forge-b
+    - type: not-skill-used
+      value: widget-forge-a
+
+- description: unrelated work, which must reach no fixture at all
+  vars:
+    query: summarise the last three client meetings
+  assert:
+    - type: not-skill-used
+      value: widget-forge-b
+    - type: not-skill-used
+      value: widget-forge-a
+    - type: not-skill-used
+      value: widget-inspect

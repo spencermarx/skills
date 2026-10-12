@@ -1,0 +1,156 @@
+# handoff: does it fire at the end of a session, and stay quiet for its neighbours?
+#
+# The near-misses matter more here than usual. `handoff` writes through
+# `scratchpad`, whose own description lists handoffs among the scratch it owns,
+# and `conveying-clearly` governs every working surface a colleague reads once.
+# Those two are the thieves nearly every case names, because they are the two
+# ways to fire wrongly that a real session actually produces.
+#
+# Run from the catalog root (costs money; see the harness-eval skill):
+#
+#   bash skills/harness/harness-eval/scripts/run.sh --skills skills evals/cases/handoff.yaml --repeat 3
+
+# ---------------------------------------------------------------------------
+# Should fire. Each is a sentence someone actually types at the end of a session.
+# ---------------------------------------------------------------------------
+
+- description: the plainest phrasing, straight from the description
+  vars:
+    query: hand this off so a fresh session can pick it up
+  assert:
+    - type: skill-used
+      value: handoff
+    - type: not-skill-used
+      value: conveying-clearly
+
+- description: names the artifact, which is also the word scratchpad claims
+  vars:
+    query: write a handoff before I stop for the day
+  assert:
+    - type: skill-used
+      value: handoff
+    - type: not-skill-used
+      value: scratchpad
+
+- description: the pressure that actually prompts it, in the words conveying-clearly uses
+  vars:
+    query: I am running out of context here, capture where we got to
+  assert:
+    - type: skill-used
+      value: handoff
+    - type: not-skill-used
+      value: conveying-clearly
+
+- description: next-session framing, with no artifact named for either skill to grab
+  vars:
+    query: I want to pick this up in a new session tomorrow morning
+  assert:
+    - type: skill-used
+      value: handoff
+    - type: not-skill-used
+      value: scratchpad
+
+- description: describes the need rather than the tool, and the reader is another agent
+  vars:
+    query: another agent is taking this over, make sure they know the gotchas and where the files are
+  assert:
+    - type: skill-used
+      value: handoff
+    - type: not-skill-used
+      value: conveying-clearly
+
+- description: compaction framing, which is the skill's own first verb
+  vars:
+    query: compact everything we have done into something the next agent can read
+  assert:
+    - type: skill-used
+      value: handoff
+    - type: not-skill-used
+      value: conveying-clearly
+
+- description: mid-task stop, phrased as a complaint with no artifact requested
+  vars:
+    query: this is going to blow the context window before we finish, do something about it
+  assert:
+    - type: skill-used
+      value: handoff
+    - type: not-skill-used
+      value: scratchpad
+
+- description: resume coordinates, which is the part people forget to ask for
+  vars:
+    query: note the branch and where to resume so I do not lose the thread
+  assert:
+    - type: skill-used
+      value: handoff
+    - type: not-skill-used
+      value: scratchpad
+
+- description: oblique and casual, the register a clean imperative sentence never measures
+  vars:
+    query: im out of runway on this one, leave whoever picks up the auth refactor next everything they need
+  assert:
+    - type: skill-used
+      value: handoff
+    - type: not-skill-used
+      value: scratchpad
+
+# ---------------------------------------------------------------------------
+# Near-misses. Every one is a written artifact produced at the end of a session,
+# which is exactly why they are the cases worth running.
+# ---------------------------------------------------------------------------
+
+- description: a settled choice, which the description routes to decision-record
+  vars:
+    query: we settled on Postgres over DynamoDB for the event store, write that down properly so nobody relitigates it
+  assert:
+    - type: not-skill-used
+      value: handoff
+    - type: skill-used
+      value: decision-record
+
+- description: deferring an out-of-scope item, which is an issue for later and not a handoff
+  vars:
+    query: open an issue so we remember the safety tier work, we are not doing it now
+  assert:
+    - type: not-skill-used
+      value: handoff
+
+- description: a scratch file with no handoff intent, reaching the skill handoff writes through
+  vars:
+    query: I need somewhere git-ignored to dump these API responses
+  assert:
+    - type: not-skill-used
+      value: handoff
+    - type: skill-used
+      value: scratchpad
+
+- description: the same compaction written for a person to act on, not for an agent to resume
+  vars:
+    query: write up where we got to on this for my manager so she can decide whether we keep going
+  assert:
+    - type: not-skill-used
+      value: handoff
+    - type: skill-used
+      value: conveying-clearly
+
+- description: a week of work summarised for people, not a session resumed by an agent
+  vars:
+    query: write up what shipped this week across the board
+  assert:
+    - type: not-skill-used
+      value: handoff
+
+- description: a recording, which is a different compaction entirely
+  vars:
+    query: turn yesterday's call recording into notes
+  assert:
+    - type: not-skill-used
+      value: handoff
+
+- description: ordinary summarisation with no next agent implied
+  vars:
+    query: give me a two line summary of what this function does
+  assert:
+    - type: not-skill-used
+      value: handoff
