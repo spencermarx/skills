@@ -20,8 +20,10 @@
 #             the two-reviewer cap is a policy choice the user makes, not an upgrade
 #   custom    ocr-team only: a team this repository chose (other personas or counts, a pinned
 #             model, a custom name, or its own comment); left as is unless the user asks
-# Exit status is 0 unless the script itself was misused or a change failed, so a missing tool
-# never reads as a crash.
+# Exit status: 0 on success, and from a check however many tools are missing, so a missing tool
+# never reads as a crash; 1 when a precondition is unmet or a change failed; 2 when the script
+# was misused; 3 when set-ocr-team found a custom team and changed nothing. init-ocr passes on
+# `ocr init`'s own status.
 # Run it from anywhere inside the repository being set up: it works at the git root, or in the
 # working directory when there is no git repository.
 
