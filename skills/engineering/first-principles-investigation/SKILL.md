@@ -14,7 +14,7 @@ description: >-
 license: MIT
 argument-hint: '[optional: the symptom, failing target, error text, or question to investigate]'
 metadata:
-  credits: "Framing inspired by the open-source First Principles Thinking skill (https://github.com/awesome-skills/first-principles-skill), re-scoped from design evaluation to empirical investigation and not vendored. Method grounded in Andreas Zeller's Why Programs Fail (scientific debugging, TRAFFIC) and David J. Agans' Debugging: The 9 Indispensable Rules; full sourcing in references/method.md."
+  ideas: "The open-source First Principles Thinking skill (https://github.com/awesome-skills/first-principles-skill), its framing re-scoped from design evaluation to empirical investigation and not vendored. Method grounded in Andreas Zeller's Why Programs Fail (scientific debugging, TRAFFIC) and David J. Agans' Debugging: The 9 Indispensable Rules; full sourcing in references/method.md."
 ---
 
 # First-Principles Investigation

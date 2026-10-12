@@ -1,0 +1,936 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   Live whiteboard — operator panel.
+
+   Design tokens (the single source of scale + color for the panel). tldraw owns
+   the canvas; everything here is the sidebar "room".
+
+   [reskin] The register is Airbnb / Linear / Raycast lead-designer craft, replacing
+   the earlier "toy-like" pass. The core move: color is INFORMATION, not decoration.
+   The surface is neutral; identity color lives in one concentrated place — small
+   solid avatar discs and tiny leading dots — while text hierarchy is carried by
+   weight, size, and neutral tone rather than hue. One restrained accent, true
+   hairline borders, a tight type scale, and denser rhythm.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+.wb-root {
+  /* Spacing scale — 4 / 8 / 12 / 16 */
+  --wb-s1: 4px;
+  --wb-s2: 8px;
+  --wb-s3: 12px;
+  --wb-s4: 16px;
+
+  /* Type scale — denser than before: xs metadata, sm secondary, md body (13, not 14),
+     lg the panel title (15, not a chunky 16). */
+  --wb-fs-xs: 11px;
+  --wb-fs-sm: 12px;
+  --wb-fs-md: 13px;
+  --wb-fs-lg: 15px;
+
+  /* Radii + motion — tighter corners read less bubbly (8 / 6, was 10 / 7). */
+  --wb-radius: 8px;
+  --wb-radius-sm: 6px;
+  --wb-dur: 160ms;
+  --wb-ease: cubic-bezier(0.2, 0.6, 0.2, 1);
+
+  /* One restrained accent — a refined indigo (was a loud #7c4dff violet). */
+  --wb-accent: #5e6ad2;
+  --wb-accent-hover: #515dc0;
+
+  /* Semantic status */
+  --wb-success: #2f9e6b;
+  --wb-warn: #d08324;
+  --wb-danger: #d1495b;
+
+  /* Surfaces + text (light) — cool neutrals with true hairline borders. */
+  --wb-bg: #ffffff;
+  --wb-surface: #f7f7f8;
+  --wb-surface-hover: #efeff1;
+  --wb-border: #ececef;
+  --wb-border-strong: #dcdce1;
+  --wb-text: #16171a;
+  /* Secondary text is used for real labels (recipient caption, timestamps-to-be, hints), so it must
+     clear WCAG AA 4.5:1 on white — #6b6f77 ≈ 4.7:1, where the old #83878e was ~3.6:1. */
+  --wb-muted: #6b6f77;
+  --wb-you: #2b8a67;
+
+  /* Elevation — a single soft shadow token for the one floating surface (popover). */
+  --wb-shadow: 0 8px 24px rgba(20, 21, 26, 0.12), 0 1px 2px rgba(20, 21, 26, 0.06);
+
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+  color: var(--wb-text);
+  font-size: var(--wb-fs-md);
+}
+
+@media (prefers-color-scheme: dark) {
+  .wb-root {
+    --wb-accent: #7c85e0;
+    --wb-accent-hover: #8b93e6;
+
+    --wb-success: #3fb97f;
+    --wb-warn: #e0a24a;
+
+    --wb-bg: #0f1011;
+    --wb-surface: #17181a;
+    --wb-surface-hover: #202124;
+    --wb-border: #26282c;
+    --wb-border-strong: #34373d;
+    --wb-text: #e7e8ea;
+    --wb-muted: #8a8f98;
+    --wb-you: #4fd0a0;
+
+    --wb-shadow: 0 8px 28px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4);
+  }
+}
+
+.wb-canvas {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+}
+
+/* tldraw needs a positioned, sized ancestor */
+.wb-canvas .tl-container {
+  position: absolute;
+  inset: 0;
+}
+
+/* Shared focus treatment on every interactive element in the panel. */
+.wb-panel :focus-visible,
+.wb-toggle:focus-visible {
+  outline: 2px solid var(--wb-accent);
+  outline-offset: 2px;
+  border-radius: var(--wb-radius-sm);
+}
+
+/* ── Collapsible panel (zen mode) ────────────────────────────────────────────
+   The panel is a clipping container; the fixed-width inner slides out to zero so
+   content never reflows during the animation. */
+.wb-panel {
+  flex: 0 0 340px;
+  width: 340px;
+  height: 100%;
+  overflow: hidden;
+  box-sizing: border-box;
+  transition: flex-basis var(--wb-dur) var(--wb-ease), width var(--wb-dur) var(--wb-ease);
+}
+.wb-root.wb-collapsed .wb-panel {
+  flex-basis: 0;
+  width: 0;
+}
+
+.wb-panel-inner {
+  width: 340px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--wb-border);
+  background: var(--wb-bg);
+  box-sizing: border-box;
+}
+
+/* Pull-tab handle: fixed to the panel's left edge, always visible so the panel
+   can never be lost. Slides with the panel. */
+.wb-toggle {
+  /* The button is a 44px-wide transparent hit target; the visible pull-tab (.wb-toggle-grip)
+     stays slim and hugs the panel edge. This meets the 44px tap-target promise without a chunky bar. */
+  position: fixed;
+  top: 50%;
+  right: 340px;
+  transform: translateY(-50%);
+  z-index: 500;
+  width: 44px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  background: transparent;
+  border: none;
+  transition: right var(--wb-dur) var(--wb-ease);
+}
+.wb-root.wb-collapsed .wb-toggle {
+  right: 0;
+}
+.wb-toggle-grip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 48px;
+  font-size: var(--wb-fs-md);
+  color: var(--wb-muted);
+  border: 1px solid var(--wb-border);
+  border-right: none;
+  border-radius: var(--wb-radius) 0 0 var(--wb-radius);
+  background: var(--wb-bg);
+  transition: background var(--wb-dur) var(--wb-ease), color var(--wb-dur) var(--wb-ease);
+}
+.wb-toggle:hover .wb-toggle-grip {
+  background: var(--wb-surface-hover);
+  color: var(--wb-text);
+}
+.wb-toggle .wb-unread {
+  position: absolute;
+  top: 6px;
+  right: 5px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--wb-accent);
+  box-shadow: 0 0 0 2px var(--wb-bg);
+}
+
+/* ── Board switcher: trigger + popover ───────────────────────────────────────── */
+.wb-topbar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--wb-s2);
+  padding: var(--wb-s2) var(--wb-s3);
+  border-bottom: 1px solid var(--wb-border);
+}
+
+.wb-board-trigger {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--wb-s2);
+  min-height: 36px;
+  padding: var(--wb-s1) var(--wb-s2);
+  font: inherit;
+  color: var(--wb-text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--wb-radius-sm);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--wb-dur) var(--wb-ease), border-color var(--wb-dur) var(--wb-ease);
+}
+.wb-board-trigger:hover {
+  background: var(--wb-surface);
+  border-color: var(--wb-border);
+}
+.wb-board-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* [reskin] Title, not a headline: 15px / 600, was a chunky 16 / 650. */
+  font-size: var(--wb-fs-lg);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.wb-caret {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--wb-muted);
+}
+
+/* Connection indicator (was .wb-dot). */
+.wb-conn {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  transition: background var(--wb-dur) var(--wb-ease);
+}
+.wb-conn.on {
+  background: var(--wb-success);
+}
+.wb-conn.off {
+  background: var(--wb-border-strong);
+  box-shadow: inset 0 0 0 1px var(--wb-border-strong);
+  animation: wb-pulse 1.4s ease-in-out infinite;
+}
+
+.wb-board-popover {
+  position: absolute;
+  top: calc(100% - var(--wb-s1));
+  left: var(--wb-s3);
+  right: var(--wb-s3);
+  z-index: 600;
+  background: var(--wb-bg);
+  border: 1px solid var(--wb-border-strong);
+  border-radius: var(--wb-radius);
+  box-shadow: var(--wb-shadow);
+  padding: var(--wb-s2);
+  animation: wb-pop var(--wb-dur) var(--wb-ease);
+}
+@keyframes wb-pop {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+.wb-board-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--wb-s1) var(--wb-s2) var(--wb-s2);
+  font-size: var(--wb-fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--wb-muted);
+}
+.wb-new {
+  font: inherit;
+  font-size: var(--wb-fs-sm);
+  font-weight: 550;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--wb-accent);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--wb-radius-sm);
+  padding: var(--wb-s1) var(--wb-s2);
+  min-height: 32px;
+  cursor: pointer;
+  transition: background var(--wb-dur) var(--wb-ease);
+}
+.wb-new:hover {
+  background: color-mix(in srgb, var(--wb-accent) 10%, transparent);
+}
+
+.wb-board-menu {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.wb-menu-empty {
+  padding: var(--wb-s2);
+  color: var(--wb-muted);
+  font-style: italic;
+  font-size: var(--wb-fs-sm);
+}
+.wb-board-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--wb-s2);
+  min-height: 36px;
+  padding: var(--wb-s2);
+  font: inherit;
+  color: var(--wb-text);
+  background: transparent;
+  border: 0;
+  border-radius: var(--wb-radius-sm);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--wb-dur) var(--wb-ease);
+}
+.wb-board-item:hover {
+  background: var(--wb-surface-hover);
+}
+.wb-board-item.is-active {
+  background: color-mix(in srgb, var(--wb-accent) 8%, transparent);
+}
+.wb-board-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--wb-fs-md);
+  font-weight: 500;
+}
+.wb-board-item.is-active .wb-board-item-name {
+  font-weight: 550;
+}
+.wb-board-check {
+  flex: 0 0 auto;
+  color: var(--wb-accent);
+  font-size: var(--wb-fs-sm);
+  font-weight: 600;
+}
+
+/* ── Close session (teardown) — a quiet footer control in the switcher popover ────
+   [v9.1, #53] Deliberately low-emphasis: a text button that only warms to the danger hue,
+   separated from the board list by a hairline, so the operator's one teardown signal never
+   competes with Send. It expands to an in-app Confirm/Cancel (no browser confirm). */
+.wb-popover-footer {
+  margin-top: var(--wb-s2);
+  padding-top: var(--wb-s2);
+  border-top: 1px solid var(--wb-border);
+}
+.wb-close-session {
+  width: 100%;
+  min-height: 34px;
+  padding: var(--wb-s1) var(--wb-s2);
+  font: inherit;
+  font-size: var(--wb-fs-sm);
+  font-weight: 550;
+  text-align: left;
+  color: var(--wb-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--wb-radius-sm);
+  cursor: pointer;
+  transition: background var(--wb-dur) var(--wb-ease), color var(--wb-dur) var(--wb-ease);
+}
+.wb-close-session:hover {
+  color: var(--wb-danger);
+  background: color-mix(in srgb, var(--wb-danger) 8%, transparent);
+}
+/* The armed confirm: question + affirm/cancel, laid out so Cancel is the larger, calmer default. */
+.wb-close-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--wb-s2);
+  padding: var(--wb-s1) var(--wb-s2);
+}
+.wb-close-q {
+  font-size: var(--wb-fs-sm);
+  font-weight: 600;
+  color: var(--wb-text);
+}
+.wb-close-choices {
+  display: flex;
+  gap: var(--wb-s2);
+}
+.wb-close-affirm,
+.wb-close-cancel {
+  flex: 1 1 auto;
+  min-height: 32px;
+  padding: 0 var(--wb-s3);
+  font: inherit;
+  font-size: var(--wb-fs-sm);
+  font-weight: 600;
+  border-radius: var(--wb-radius-sm);
+  cursor: pointer;
+  transition: background var(--wb-dur) var(--wb-ease), color var(--wb-dur) var(--wb-ease),
+    border-color var(--wb-dur) var(--wb-ease);
+}
+/* Confirm is the destructive action — solid danger, but modest in size so it doesn't shout. */
+.wb-close-affirm {
+  color: #fff;
+  background: var(--wb-danger);
+  border: 1px solid transparent;
+}
+.wb-close-affirm:hover {
+  background: color-mix(in srgb, var(--wb-danger) 88%, #000);
+}
+.wb-close-cancel {
+  color: var(--wb-text);
+  background: var(--wb-surface);
+  border: 1px solid var(--wb-border-strong);
+}
+.wb-close-cancel:hover {
+  background: var(--wb-surface-hover);
+}
+/* The post-confirm progress line inside the footer (mirrors the standalone closing banner). */
+.wb-close-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--wb-s2);
+  padding: var(--wb-s1) var(--wb-s2);
+  font-size: var(--wb-fs-sm);
+  font-weight: 550;
+  color: var(--wb-muted);
+}
+.wb-close-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--wb-accent);
+  animation: wb-pulse 1.4s ease-in-out infinite;
+}
+
+/* The standalone, always-visible "closing…" notice — same calm register as .wb-notice. */
+.wb-closing {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--wb-s2);
+  margin: 0 var(--wb-s3) var(--wb-s3);
+  padding: var(--wb-s3);
+  background: var(--wb-surface);
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-radius);
+  font-size: var(--wb-fs-sm);
+  line-height: 1.5;
+  color: var(--wb-muted);
+}
+.wb-closing-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--wb-accent);
+  animation: wb-pulse 1.4s ease-in-out infinite;
+}
+.wb-closing-text {
+  min-width: 0;
+}
+
+/* [v9.6, fix 4] Silent-data-loss guard banner. A canvas overlay (not a panel notice): fixed to the
+   top-center of the viewport, above tldraw's own UI, so it survives panel-collapse and is
+   unmissable. Self-colored (deep danger red + white) rather than theme tokens, so it stays
+   high-contrast and readable in BOTH light and dark — this is an alert, not the calm .wb-notice. */
+.wb-disconnect-banner {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 99999;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--wb-s2);
+  max-width: min(560px, calc(100vw - 2 * var(--wb-s4)));
+  padding: var(--wb-s2) var(--wb-s3);
+  border-radius: var(--wb-radius);
+  font-size: var(--wb-fs-sm);
+  line-height: 1.45;
+  font-weight: 500;
+  color: #ffffff;
+  background: var(--wb-danger);
+  border: 1px solid color-mix(in srgb, var(--wb-danger) 76%, #000);
+  box-shadow: var(--wb-shadow);
+}
+.wb-disconnect-dot {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: #ffffff;
+  animation: wb-pulse 1.4s ease-in-out infinite;
+}
+.wb-disconnect-text {
+  min-width: 0;
+}
+
+/* ── Collaborators: presence row of small, flat, tappable avatars ─────────────── */
+.wb-presence {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--wb-s2);
+  padding: var(--wb-s3);
+  border-bottom: 1px solid var(--wb-border);
+}
+
+/* [reskin] A labeled participant chip — disc + name — not a lone floating disc (which read as an
+   orphaned placeholder tile). Tapping it still addresses that collaborator; SELECTED is a calm
+   active-item background chip (Linear/Slack), never a ring. */
+.wb-avatar {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--wb-s2);
+  height: 34px;
+  padding: 0 var(--wb-s3) 0 var(--wb-s1);
+  background: transparent;
+  border: 0;
+  border-radius: var(--wb-radius);
+  cursor: pointer;
+  transition: background var(--wb-dur) var(--wb-ease);
+}
+.wb-avatar:hover:not(.is-selected) {
+  background: var(--wb-surface);
+}
+.wb-avatar.is-selected {
+  background: var(--wb-surface-hover);
+}
+.wb-av-name {
+  font-size: var(--wb-fs-sm);
+  font-weight: 550;
+  color: var(--wb-text);
+  white-space: nowrap;
+}
+/* The disc's positioning context, so the status dot anchors to the disc, not the whole chip. */
+.wb-av-figure {
+  position: relative;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+}
+/* [reskin] A SMALL, FLAT, solid identity disc (28px, was a 36px tinted bubble). The generous 40px
+   button around it keeps a comfortable tap target; the visible mark stays precise. The initial is
+   white or near-black, picked by luminance in discLabelColor, so it clears AA on every hue. */
+.wb-av-disc {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: var(--wb-fs-xs);
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  color: var(--wb-on-id, #fff);
+  background: var(--wb-id-color, var(--wb-accent));
+  /* A hairline inner edge so a very light disc doesn't float on a white surface. */
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, #000 10%, transparent);
+}
+/* [reskin] The disc itself never rings — selection is the active-item background chip on .wb-avatar
+   above, plus the compose "To" chip. A ring here was the always-on halo on the default-selected lead. */
+
+/* Lifecycle dot in the disc's corner. Each state carries a non-color channel — fill vs ring vs
+   dashed ring vs faint ring — so it reads without relying on hue or motion (a11y invariant). */
+.wb-av-dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  box-sizing: border-box;
+  background: transparent;
+  box-shadow: 0 0 0 2px var(--wb-bg); /* separator ring against the disc */
+}
+/* idle — the resting state carries no dot at all (its presence in the row is the signal). Showing a
+   thin ring here read as a clipped "broken cog" at this size; meaningful states below still show. */
+.wb-av-dot-idle {
+  display: none;
+}
+/* listening — solid filled */
+.wb-av-dot-listening {
+  background: var(--wb-success);
+}
+/* active — solid filled, gently pulsing (no static 4px halo; the pulse alone carries "at work") */
+.wb-av-dot-active {
+  background: var(--wb-accent);
+  animation: wb-pulse 1.4s ease-in-out infinite;
+}
+/* stalled — hollow ring */
+.wb-av-dot-stalled {
+  border: 2.5px solid var(--wb-warn);
+}
+/* absent — carried by the dimmed disc below (a clean non-color channel), not a dot. A dashed micro-
+   ring read as a broken glyph at this size and was redundant with the dimming. */
+.wb-av-dot-absent {
+  display: none;
+}
+/* Absent dims the whole disc — the "away" signal. :has() is Chromium-only — fine for this Chrome POC. */
+.wb-avatar:has(.wb-av-dot-absent) .wb-av-disc {
+  opacity: 0.45;
+}
+
+/* Everyone: a broadcast target, styled as a slim neutral pill rather than an avatar. */
+.wb-everyone {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 0 var(--wb-s3);
+  font: inherit;
+  font-size: var(--wb-fs-sm);
+  font-weight: 550;
+  color: var(--wb-muted);
+  background: var(--wb-surface);
+  border: 1px solid var(--wb-border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background var(--wb-dur) var(--wb-ease), color var(--wb-dur) var(--wb-ease),
+    border-color var(--wb-dur) var(--wb-ease);
+}
+.wb-everyone:hover {
+  background: var(--wb-surface-hover);
+  color: var(--wb-text);
+}
+.wb-everyone.is-selected {
+  color: #fff;
+  background: var(--wb-accent);
+  border-color: var(--wb-accent);
+}
+
+/* ── The room: chat log ──────────────────────────────────────────────────────── */
+.wb-log {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  /* Extra top padding + a top fade-mask so a scrolled message dissolves into the header instead of
+     being hard-clipped mid-sentence against the divider (all four critique lenses flagged the clip). */
+  padding: var(--wb-s4) var(--wb-s3) var(--wb-s3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--wb-s4);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 16px);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 16px);
+}
+
+/* [reskin] Each turn is a name line (a 6px identity dot + a NEUTRAL name — the toy tell was a big
+   saturated word) with the body on the line below it, so speaker boundaries are unambiguous and the
+   log stops reading as one undifferentiated wall of text. */
+.wb-log-line {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  line-height: 1.55;
+}
+.wb-who {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--wb-fs-sm);
+  font-weight: 600;
+  color: var(--wb-text);
+}
+.wb-who-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--wb-line-color, var(--wb-accent));
+}
+.wb-who-name {
+  flex: 0 0 auto;
+}
+.wb-to {
+  font-weight: 500;
+  font-size: var(--wb-fs-sm);
+  color: var(--wb-muted);
+}
+.wb-msg {
+  color: var(--wb-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Empty state: an invitation, not a placeholder. */
+.wb-log-empty {
+  margin: auto 0;
+  padding: var(--wb-s4) var(--wb-s2);
+  text-align: center;
+}
+.wb-log-empty-title {
+  margin: 0 0 var(--wb-s1);
+  font-size: var(--wb-fs-md);
+  font-weight: 600;
+  color: var(--wb-text);
+}
+.wb-log-empty-sub {
+  margin: 0;
+  font-size: var(--wb-fs-sm);
+  line-height: 1.5;
+  color: var(--wb-muted);
+}
+
+/* Per-Send lifecycle badge trailing the operator's own lines. Quieter than before: a soft neutral
+   pill, sentence case, with only the "working" state carrying the accent and "stalled" the warn hue. */
+.wb-life {
+  display: inline-block;
+  margin-left: 2px;
+  font-size: var(--wb-fs-xs);
+  font-weight: 550;
+  letter-spacing: 0.01em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  vertical-align: baseline;
+  white-space: nowrap;
+}
+.wb-life-queued {
+  background: color-mix(in srgb, var(--wb-muted) 16%, transparent);
+  color: var(--wb-muted);
+}
+.wb-life-working {
+  background: color-mix(in srgb, var(--wb-accent) 14%, transparent);
+  color: var(--wb-accent);
+}
+.wb-life-stalled {
+  background: color-mix(in srgb, var(--wb-warn) 18%, transparent);
+  color: var(--wb-warn);
+}
+.wb-life-done {
+  background: color-mix(in srgb, var(--wb-success) 16%, transparent);
+  color: var(--wb-success);
+}
+
+/* ── Calm inline notice (was the amber alert) ────────────────────────────────── */
+.wb-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--wb-s2);
+  margin: 0 var(--wb-s3) var(--wb-s3);
+  padding: var(--wb-s3);
+  background: var(--wb-surface);
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-radius);
+  font-size: var(--wb-fs-sm);
+  line-height: 1.5;
+  color: var(--wb-muted);
+}
+.wb-notice-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  /* Muted for the ordinary "no one here yet, queued" case; amber is reserved for a stalled agent. */
+  background: var(--wb-muted);
+}
+.wb-notice-stalled .wb-notice-dot {
+  background: var(--wb-warn);
+}
+.wb-notice-text {
+  min-width: 0;
+}
+.wb-notice code {
+  font-size: var(--wb-fs-xs);
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--wb-text) 8%, transparent);
+  color: var(--wb-text);
+  white-space: nowrap;
+}
+
+/* ── Compose ─────────────────────────────────────────────────────────────────── */
+.wb-compose {
+  display: flex;
+  flex-direction: column;
+  gap: var(--wb-s2);
+  padding: var(--wb-s3);
+  border-top: 1px solid var(--wb-border);
+}
+
+/* "To" indicator — who this Send is addressed to (set by tapping an avatar). Neutral pill with a
+   pure-hue dot; the identity color is the dot, not a tinted background. */
+.wb-compose-to {
+  display: flex;
+  align-items: center;
+  gap: var(--wb-s2);
+  font-size: var(--wb-fs-sm);
+}
+.wb-to-caption {
+  color: var(--wb-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  font-size: var(--wb-fs-xs);
+}
+.wb-to-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px var(--wb-s2);
+  /* A gentle radius, not a full pill — a full-pill on a small chip reads toy (Linear/Raycast use a
+     tight radius on recipient/token chips). */
+  border-radius: var(--wb-radius-sm);
+  font-size: var(--wb-fs-sm);
+  font-weight: 550;
+  color: var(--wb-text);
+  background: var(--wb-surface);
+  border: 1px solid var(--wb-border);
+}
+.wb-to-swatch {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--wb-id-color, var(--wb-accent));
+}
+
+.wb-compose textarea {
+  /* No native resize grip — the corner grabber is an unstyled-textarea tell. */
+  resize: none;
+  min-height: 64px;
+  font: inherit;
+  font-size: var(--wb-fs-md);
+  line-height: 1.5;
+  padding: var(--wb-s2) var(--wb-s3);
+  border-radius: var(--wb-radius-sm);
+  border: 1px solid var(--wb-border-strong);
+  background: var(--wb-bg);
+  color: var(--wb-text);
+  box-sizing: border-box;
+  transition: border-color var(--wb-dur) var(--wb-ease), box-shadow var(--wb-dur) var(--wb-ease);
+}
+.wb-compose textarea::placeholder {
+  color: var(--wb-muted);
+}
+.wb-compose textarea:focus {
+  outline: none;
+  border-color: var(--wb-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--wb-accent) 18%, transparent);
+}
+
+.wb-compose-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+/* The keyboard hint, moved out of the placeholder (where it vanished the moment you typed) into a
+   persistent caption beside Send. */
+.wb-send-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--wb-fs-xs);
+  color: var(--wb-muted);
+}
+.wb-send-hint kbd {
+  font: inherit;
+  font-size: 10px;
+  min-width: 15px;
+  padding: 1px 4px;
+  text-align: center;
+  border-radius: 4px;
+  background: var(--wb-surface);
+  border: 1px solid var(--wb-border);
+  color: var(--wb-muted);
+}
+/* [reskin] A confident solid-accent Send. Its DISABLED state goes neutral-gray (surface + muted),
+   not a pale tint of the accent — so an empty compose reads clearly "off" instead of the old
+   pale-lavender that looked permanently disabled even when it wasn't. */
+.wb-send {
+  min-height: 34px;
+  padding: 0 var(--wb-s4);
+  font: inherit;
+  font-size: var(--wb-fs-md);
+  font-weight: 600;
+  color: #fff;
+  background: var(--wb-accent);
+  border: 1px solid transparent;
+  border-radius: var(--wb-radius-sm);
+  cursor: pointer;
+  transition: background var(--wb-dur) var(--wb-ease), color var(--wb-dur) var(--wb-ease),
+    border-color var(--wb-dur) var(--wb-ease), transform var(--wb-dur) var(--wb-ease);
+}
+.wb-send:hover:not(:disabled) {
+  background: var(--wb-accent-hover);
+}
+.wb-send:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.wb-send:disabled {
+  color: var(--wb-muted);
+  background: var(--wb-surface);
+  border-color: var(--wb-border);
+  cursor: default;
+}
+
+@keyframes wb-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wb-av-dot-active,
+  .wb-conn.off,
+  .wb-closing-dot,
+  .wb-disconnect-dot,
+  .wb-close-dot {
+    animation: none;
+  }
+  .wb-board-popover {
+    animation: none;
+  }
+}

@@ -9,7 +9,7 @@ in at least one of them. `npm run check` enforces what can be enforced.
 
 ```
 skills/<family>/<skill>/SKILL.md     families: core planning engineering writing strategy harness visual
-skills/_incubating/<skill>/          public beta: installable by name, not in the plugin
+skills/_incubating/<skill>/          public beta: installed only by name (--skill), not in the plugin
 .claude-plugin/plugin.json           one plugin; "skills" lists every promoted skill path
 .claude-plugin/marketplace.json      the "aclarify" marketplace: this plugin + ocr
 evals/cases/                         routing evals for this repo's own skills (harness-eval's promptfoo format)
@@ -32,7 +32,13 @@ Claude Code.
    `license`, `compatibility`, `metadata`, `allowed-tools`. The only extras
    allowed are `disable-model-invocation`, `user-invocable` and `argument-hint`,
    which other harnesses ignore. `description` is at most 1024 characters with
-   the trigger first. `metadata` values are strings.
+   the trigger first. Every backticked kebab-case name in a `description` is a
+   route to another skill, so it must be one (the `gh` CLI and `check`,
+   `setup-aclarify-skills`' argument, are the allowed exceptions). `metadata`
+   values are strings, with one exception: every skill under
+   `skills/_incubating/` sets `internal: true`, a boolean, which the
+   `npx skills` installer reads as "install only when named with `--skill`".
+   No skill elsewhere may set it.
 2. **User-invoked skills** (`disable-model-invocation: true`) also ship
    `agents/openai.yaml`, which is how Codex learns the same thing:
 
@@ -51,7 +57,13 @@ Claude Code.
    > Load the `scratchpad` skill (through your skill tool, `/scratchpad`, or by
    > reading its SKILL.md), then …
 
-   Say what to do when it is not installed. Never write `Skill(...)`, a
+   The typed route `/scratchpad` names the same skill as the sentence.
+   `npm run check` compares it with the nearest skill named in backticks before
+   the parenthesis, in the same sentence (a sentence ends at `.`, `!` or `?`, or
+   at a line opening a list item); with several typed routes, that many nearest
+   names. A sentence that names no skill ("load it") is read with its whole
+   paragraph. `/<name>` stands in only when the sentence loads each skill of a
+   list. Say what to do when it is not installed. Never write `Skill(...)`, a
    `plugin:` prefix, or a `../other-skill/` path.
 5. **Bundled files.** Reference them relative to the skill's own folder, one
    level deep (`scripts/x.sh`, `references/y.md`), and say once near the top:
@@ -92,10 +104,10 @@ No skill hardcodes where a repository keeps things. The `setup-aclarify-skills` 
 
 | File | Holds | Read by |
 |---|---|---|
-| `docs/agents/issue-tracker.md` | where issues live and how to create, read and label them | triage, wayfinder, to-questionnaire, handoff, prototype |
+| `docs/agents/issue-tracker.md` | where issues live and how to create, read and label them | triage, wayfinder, to-questionnaire, handoff, prototype, arch-board, ceo-review, strategic-brief, session-retro |
 | `docs/agents/triage-labels.md` | the label string for each triage role | triage |
-| `docs/agents/domain.md` | glossary file name and layout, decision-record folder | domain-modeling, decision-record, grill-with-docs, conveying-clearly, prototype |
-| `docs/agents/workspace.md` | scratch folder, conventions folder, eval cases folder, code review, checks before commit | scratchpad, handoff, create-report, wayfinder, teach, prototype, write-comments, clean-comments, harness-eval, ocr-review-loop |
+| `docs/agents/domain.md` | glossary file name and layout, decision-record folder | ubiquitous-language, domain-modeling, decision-record, grill-with-docs, conveying-clearly, handoff, prototype, arch-board, tdd, triage, standards, add-standard |
+| `docs/agents/workspace.md` | scratch folder, conventions folder, brand kit, eval cases folder, code review, checks before commit | most skills: every skill that writes scratch files, follows house rules or reads the brand. `grep -rl docs/agents/workspace skills` lists them |
 
 The first three use the file names and formats of
 `mattpocock/skills`' setup skill, so a repository can run both catalogs.
@@ -113,23 +125,49 @@ multi-context repository adds `GLOSSARY-MAP.md`), decision records in
 
 ## Credits
 
-A skill adapted from another project says so in frontmatter:
+Credit what a skill draws on, even when it has been rewritten, in one of two
+frontmatter keys. When text was copied or adapted, even in paraphrase, the
+credit goes in `metadata.credits`, naming the project's URL, and that project's
+licence goes in `NOTICE`, in a section whose header line ends with the same URL:
 
 ```yaml
 metadata:
   credits: "Adapted from Matt Pocock's grill-me skill, https://github.com/mattpocock/skills (MIT)"
 ```
 
-and, when text was copied or adapted from a licensed project, that project's
-licence goes in `NOTICE`. Credit what the skill draws on, even when it has been
-rewritten; a credit for ideas alone (a book, a method) needs no `NOTICE` entry.
+A credit for ideas alone (a book, a method, a skill read but not adapted) goes
+in `metadata.ideas` and needs no `NOTICE` section:
+
+```yaml
+metadata:
+  ideas: "John Ousterhout's A Philosophy of Software Design"
+```
+
+A skill that has both carries both keys; one string never mixes them.
+`npm run check` fails a `credits` value that names no URL, names a URL with no
+`NOTICE` section, or opens with `Ideas from `, and an `ideas` value that uses
+the word adapted, copied, paraphrased, ported or derived.
 
 ## Lifecycle
 
-New skills start in `skills/_incubating/`. Promote one by moving its folder into
-a family and running `npm run sync`. A retired skill is deleted; its changeset
-names the replacement. A skill that does not meet `SCOPE.md` belongs in
-`.out-of-scope/` as a reasoned note, not in the tree.
+New skills start in `skills/_incubating/`, with `metadata.internal: true`, so a
+bare `npx skills add` leaves them out and `--skill <name>` installs one; the
+plugin does not list them. A skill moves into a family once it has been used for
+real and its routing cases in `evals/cases/` show it fires when it should and
+stays quiet when it should not. Promote one by moving its folder into a family,
+deleting `internal`, and running `npm run sync`. A skill ported from an
+established source (a maintained public catalog, or a skill long in use in
+another repository) may enter a family directly, but it still carries routing
+cases in `evals/cases/`: a should-fire case and the near miss most likely to
+steal it. `npm run check` fails an `_incubating/` skill without `internal: true`,
+and `npm test` fails a promoted skill with no `skill-used` case, apart from a
+named list of older skills in `tests/routing-coverage.test.mjs`. That list must
+be a subset of the seven names frozen there, and drop each name once its case
+lands, so it can only shrink unless someone visibly edits the frozen set.
+
+A retired skill is deleted; its changeset names the replacement. A skill that
+does not meet `SCOPE.md` belongs in `.out-of-scope/` as a reasoned note, not in
+the tree.
 
 ## Checks and releases
 

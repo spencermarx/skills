@@ -17,8 +17,14 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            skills/_incubating/whiteboard/server/package-lock.json
       - run: npm ci
-      # Manifest sync, the portability contract, and the installer tests.
+      # The whiteboard server's dependencies, so its suites run instead of skipping. They run
+      # headless (WHITEBOARD_NO_CANVAS), so neither Chromium nor the app build is needed.
+      - run: npm ci --prefix skills/_incubating/whiteboard/server --no-audit --no-fund
+      # Manifest sync, the portability contract, the installer tests and the whiteboard suites.
       - run: npm test
       # The Claude Code plugin and marketplace schema, as Claude Code itself reads them.
       - run: npx -y @anthropic-ai/claude-code plugin validate .

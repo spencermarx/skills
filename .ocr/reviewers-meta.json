@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-10-12T15:01:29.336Z",
+  "generated_at": "2026-10-12T15:15:29.823Z",
   "reviewers": [
     {
       "id": "accessibility",
@@ -67,7 +67,7 @@
         "Evolutionary Architecture",
         "Architectural Fitness"
       ],
-      "is_default": false,
+      "is_default": true,
       "is_builtin": true
     },
     {
@@ -336,7 +336,7 @@
         "Documentation",
         "Error Handling"
       ],
-      "is_default": true,
+      "is_default": false,
       "is_builtin": true
     },
     {

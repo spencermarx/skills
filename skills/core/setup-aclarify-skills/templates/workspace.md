@@ -8,6 +8,15 @@ Edit any line; the skills read this file each time.
 - **Conventions folder:** none. Set a path (for example `docs/standards/`) and
   `write-comments`, `clean-comments` and the review skills follow the house rules
   they find there.
+- **Brand kit:** none. Set a folder (for example `docs/brand/`) holding your colours,
+  typography, logos, design system and voice, in the files `get-brand-kit`
+  documents, and `get-brand-kit`, `brand-review`, `create-html-slides` and
+  `design-expert` take the brand from it before any other source, whether or not
+  `get-brand-kit` is installed. With none, `brand-review` uses a brand guide
+  you name or keep in the conventions folder, and otherwise asks you for one;
+  `design-expert` uses the repository's own design tokens, then
+  `get-brand-kit`'s placeholder kit; `create-html-slides` uses that placeholder
+  kit.
 - **Eval cases:** `.evals/cases/`. The routing cases `harness-eval` runs for this
   repository's own skills.
 - **Checks before commit:** none set. Skills that commit run what `AGENTS.md`

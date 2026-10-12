@@ -1,0 +1,2 @@
+{"type": "assistant", "sessionId": "11111111-1111-1111-1111-111111111111", "requestId": "req-4", "isSidechain": true, "gitBranch": "main", "timestamp": "2026-09-05T00:00:00.000Z", "message": {"id": "msg_req-4", "content": [{"type": "tool_use", "id": "call-d", "name": "Bash", "input": {"command": "grep -n needle src"}}]}}
+{"type": "assistant", "sessionId": "11111111-1111-1111-1111-111111111111", "requestId": "req-4", "isSidechain": true, "gitBranch": "main", "timestamp": "2026-09-05T00:00:00.000Z", "message": {"id": "msg_req-4", "content": [{"type": "text", "text": "done"}]}}

@@ -18,7 +18,7 @@ Nothing is written until the user agrees. Once the interview closes, put the can
 
 ## If a skill is missing
 
-`grill-me` is required; if it is not installed, say so and stop. Without `domain-modeling`, record approved items yourself, using these defaults unless the repository's configuration says otherwise.
+`grill-me` is required; if it is not installed, say so and stop. Without `domain-modeling`, record approved items yourself: write glossary entries through the `ubiquitous-language` skill when it is installed, which owns the glossary format; otherwise use these defaults unless the repository's configuration says otherwise.
 
 This repository's agent configuration should have been provided to you (the `## Agent skills` block pointing at `docs/agents/`). If it is missing, use the defaults below and suggest the user run the `setup-aclarify-skills` skill.
 

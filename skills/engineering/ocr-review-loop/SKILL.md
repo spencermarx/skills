@@ -76,8 +76,10 @@ ocr-review-loop [pr] [--team <spec>] [--max-rounds N] [--no-final-suggestions] [
 
 - `pr` (optional): PR number. Default: the open PR for the current branch.
 - `--team <spec>` (optional): reviewer team override (`reviewer-id:count,...`),
-  forwarded to the review. **Default: the project's default team**
-  (`ocr team resolve`).
+  forwarded to the review; it replaces the default team for this run.
+  **Default: the project's default team** (`ocr team resolve`). The catalog's
+  default, which `setup-aclarify-skills` writes, is one principal and one
+  architect, at most two reviewers.
 - `--max-rounds N` (optional): safety cap on review rounds. **Default: 5.** The
   loop never runs forever.
 - `--no-final-suggestions` (optional): stop at APPROVE; skip the final

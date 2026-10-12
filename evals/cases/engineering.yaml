@@ -1,0 +1,57 @@
+# The engineering family's pairs that share a trigger. Each case names the neighbour
+# most likely to steal it. The ubiquitous-language/domain-modeling split is in harness-authoring.yaml.
+#
+#   bash skills/harness/harness-eval/scripts/run.sh --skills skills evals/cases/engineering.yaml --repeat 3
+
+- description: "a hard design fork: convene a board"
+  vars:
+    query: we can't agree whether the event log or the orders table should be the
+      source of truth; get a panel of experts to weigh the trade-offs
+  assert:
+    - type: skill-used
+      value: arch-board
+    - type: not-skill-used
+      value: ocr-review-loop
+- description: "an open PR to take to approval: the review loop, not a board"
+  vars:
+    query: review this PR and keep addressing the feedback until it's approved
+  assert:
+    - type: skill-used
+      value: ocr-review-loop
+    - type: not-skill-used
+      value: arch-board
+- description: "build it for keeps, test-first"
+  vars:
+    query: build the discount calculation test-first, red then green
+  assert:
+    - type: skill-used
+      value: tdd
+    - type: not-skill-used
+      value: prototype
+- description: "a throwaway answer to one design question"
+  vars:
+    query: spike a quick demo of the checkout state machine so we can see if the
+      logic feels right before we build it
+  assert:
+    - type: skill-used
+      value: prototype
+    - type: not-skill-used
+      value: tdd
+- description: "issues on the tracker to move toward agent-ready"
+  vars:
+    query: go through the new issues on the tracker and get the ready ones into
+      shape for an agent
+  assert:
+    - type: skill-used
+      value: triage
+    - type: not-skill-used
+      value: wayfinder
+- description: "work too big for one session: chart a map"
+  vars:
+    query: this billing migration is too big for one session; chart it as a map
+      of decision tickets we resolve one at a time
+  assert:
+    - type: skill-used
+      value: wayfinder
+    - type: not-skill-used
+      value: triage

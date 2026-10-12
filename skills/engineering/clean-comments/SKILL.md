@@ -12,7 +12,7 @@ description: >-
 license: MIT
 argument-hint: '[optional: files, a directory, or "staged" / a commit range / a PR to scope to]'
 metadata:
-  credits: "Principles from John Ousterhout's A Philosophy of Software Design"
+  ideas: "John Ousterhout's A Philosophy of Software Design"
 ---
 
 # Clean Comments

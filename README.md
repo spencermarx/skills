@@ -76,16 +76,57 @@ skill works without it, on stated defaults.
 - `watch-ci`: watch a pull request's CI to green, fixing what breaks.
 - `ocr-review-loop`: drive a pull request to an approved Open Code Review, round by round.
 - `prototype`: build a throwaway prototype that answers one design question.
+- `arch-board`: convene a board of expert personas that investigates a design fork, debates it and returns a cited verdict with dissents kept.
+- `tdd`: a test-first red-green loop at agreed seams, producing behaviour tests that survive refactors.
+- `triage`: move issues and outside pull requests through triage states to an agent-ready brief.
+- `ubiquitous-language`: write and maintain a repository's glossary files and their map, without ever overwriting one.
+
+### Writing
+
+- `gather-argument-material`: interview the author and pile up raw fragments for a piece, before any structure.
+- `draft-argued-piece`: grow an argued piece from that pile, block by block, grounding each idea before it is used.
+- `draft-conversion-copy`: draft an ask (cold email, sequence, landing page, ad) from a fixed four-part frame.
+- `humanize`: rewrite existing text so it reads as its author wrote it: profile its cadence and AI tells, rewrite by tier, check it blind.
+- `seven-copy-critics`: put marketing copy through hostile reader personas at three layers, with a failure report and a tighter rebuild.
+
+### Strategy
+
+- `strategic-brief`: test demand for an idea before anything is drafted, write the brief, challenge it, and call go or no-go.
+- `ceo-review`: commit to one stance (expand, cherry-pick, hold, cut) and review a drafted plan on eight business dimensions.
+- `rice-prioritization`: rank candidates with RICE through a deterministic calculator, then pressure-test the scores.
+- `campaign-brief`: an adversarial pre-launch review of a campaign brief on six dimensions, with a rewritten brief and a go/no-go.
+- `brand-review`: score finished marketing creative against the brand, separating mechanical fixes from judgment calls.
+
+### Visual
+
+- `design-expert`: audit, redesign and polish a product interface with senior UX and UI craft, on the brand kit and the repository's design system.
+- `get-brand-kit`: the single source of truth for a repository's brand (colours, type, logos, design system, voice), shipped as a placeholder to replace.
+- `create-html-slides`: a branded, animated 16:9 slide deck as one self-contained HTML file, with optional PDF export.
 
 ### Harness
 
 - `harness-eval`: measure whether your skills fire when they should: static checks for any harness, and routing evals that measure Claude Code (Node 22.22+, paid API runs).
 - `wizard`: generate an interactive shell wizard for steps only a human can do.
+- `skill-builder`: author, refactor or port a skill so it is atomic, portable and fires when it should.
+- `standards`: route, change or retire a written convention and keep every pointer at it in step.
+- `add-standard`: turn "we should always X" into one stated, routed convention.
+- `writing-for-agents`: the craft of prose agents read: context pointers, progressive disclosure, leading words and pruning.
+- `session-retro`: read one agent session back as evidence and propose fixes, by severity, for the layer that owns each.
+
+### Incubating
+
+Public beta, installed only by name: a bare `npx skills add` leaves these out, and
+`npx skills add spencermarx/skills#stable --skill <name>` installs one. They are not in the plugin yet.
+
+- `whiteboard`: a live tldraw board you and your agents draw on together, in your browser. It installs tldraw, Vite and Playwright's Chromium on first use, after asking; tldraw is under [its own licence](https://github.com/tldraw/tldraw/blob/main/LICENSE.md), which allows local development use.
 
 ## Credits
 
 Several skills are adapted from [Matt Pocock's skills](https://github.com/mattpocock/skills)
-(MIT). Each says so in its frontmatter, and `NOTICE` carries the licence.
+(MIT), `humanize`'s tell catalogs from Sergey Bulaev's
+[linkedin-skills](https://github.com/sergebulaev/linkedin-skills) (MIT), and parts of
+`skill-builder` from Anthropic's skill-creator in [anthropics/skills](https://github.com/anthropics/skills)
+(Apache-2.0). Each skill says so in its frontmatter, and `NOTICE` carries the licences.
 
 ## Contributing
 

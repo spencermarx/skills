@@ -1,0 +1,90 @@
+# The harness family's authoring skills, and the glossary pair from engineering and planning.
+#
+#   bash skills/harness/harness-eval/scripts/run.sh --skills skills evals/cases/harness-authoring.yaml --repeat 3
+
+- description: author a whole skill
+  vars:
+    query: create a skill that reviews database migrations
+  assert:
+    - type: skill-used
+      value: skill-builder
+    - type: not-skill-used
+      value: writing-for-agents
+    - type: not-skill-used
+      value: harness-eval
+- description: the wording an agent reads
+  vars:
+    query: tighten the prose of this AGENTS.md so agents stop missing the important
+      part
+  assert:
+    - type: skill-used
+      value: writing-for-agents
+    - type: not-skill-used
+      value: skill-builder
+- description: measure whether a skill fires
+  vars:
+    query: why did the wrong skill fire for this prompt?
+  assert:
+    - type: skill-used
+      value: harness-eval
+    - type: not-skill-used
+      value: skill-builder
+    - type: not-skill-used
+      value: session-retro
+- description: look back at one session
+  vars:
+    query: "run a retro on this session: what slowed it down?"
+  assert:
+    - type: skill-used
+      value: session-retro
+    - type: not-skill-used
+      value: harness-eval
+- description: a brand new convention
+  vars:
+    query: we should always name a ticket in every TODO; make that a rule
+  assert:
+    - type: skill-used
+      value: add-standard
+    - type: not-skill-used
+      value: standards
+- description: change an existing convention
+  vars:
+    query: rename the testing standard's heading and keep the rules pointing at it
+  assert:
+    - type: skill-used
+      value: standards
+    - type: not-skill-used
+      value: add-standard
+- description: the glossary file itself
+  vars:
+    query: scaffold a glossary for this repo
+  assert:
+    - type: skill-used
+      value: ubiquitous-language
+    - type: not-skill-used
+      value: domain-modeling
+- description: which terms matter
+  vars:
+    query: help me pin down the domain language for the billing module
+  assert:
+    - type: skill-used
+      value: domain-modeling
+    - type: not-skill-used
+      value: ubiquitous-language
+- description: the language, named by its phrase
+  vars:
+    query: pin down the ubiquitous language for billing
+  assert:
+    - type: skill-used
+      value: domain-modeling
+    - type: not-skill-used
+      value: ubiquitous-language
+- description: the glossary file's format, with no judgment asked
+  vars:
+    query: our GLOSSARY.md has drifted from the standard format; restructure it so
+      every entry has the usual sections
+  assert:
+    - type: skill-used
+      value: ubiquitous-language
+    - type: not-skill-used
+      value: domain-modeling

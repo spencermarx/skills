@@ -1,0 +1,50 @@
+# The strategy family: five reviews at different stages of a decision.
+#
+#   bash skills/harness/harness-eval/scripts/run.sh --skills skills evals/cases/strategy.yaml --repeat 3
+
+- description: an idea with nothing drafted
+  vars:
+    query: before we build anything, is there real demand for a self-serve tier?
+  assert:
+    - type: skill-used
+      value: strategic-brief
+    - type: not-skill-used
+      value: ceo-review
+- description: a drafted plan to review
+  vars:
+    query: here's our Q3 plan, review it like a CEO would
+  assert:
+    - type: skill-used
+      value: ceo-review
+    - type: not-skill-used
+      value: strategic-brief
+    - type: not-skill-used
+      value: rice-prioritization
+- description: several candidates to rank
+  vars:
+    query: rank these six feature ideas so we know what to build first
+  assert:
+    - type: skill-used
+      value: rice-prioritization
+    - type: not-skill-used
+      value: ceo-review
+- description: a campaign about to launch
+  vars:
+    query: review this campaign brief before we launch next week
+  assert:
+    - type: skill-used
+      value: campaign-brief
+    - type: not-skill-used
+      value: seven-copy-critics
+    - type: not-skill-used
+      value: brand-review
+- description: finished creative against the brand
+  vars:
+    query: does this banner match our brand guidelines?
+  assert:
+    - type: skill-used
+      value: brand-review
+    - type: not-skill-used
+      value: design-expert
+    - type: not-skill-used
+      value: campaign-brief
