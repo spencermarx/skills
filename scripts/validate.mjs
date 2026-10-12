@@ -50,9 +50,23 @@ const SKILL_REFS = [
 // Skills a passage invents as an explicit example, never meant to resolve.
 const INVENTED_SKILLS = new Set(["make-chart"]);
 
-// A credit for ideas alone (a book, a method, a skill not vendored) opens with this
-// marker and needs no NOTICE section; every other credit names its source's URL.
-const IDEAS_ONLY = /^Ideas from /;
+// A description is the one text every harness reads before choosing a skill, so there
+// every backticked kebab-case token must be a skill. These are the CLI and script names
+// a description may mention instead; add one here only when it is not a skill name.
+const DESCRIPTION_NON_SKILLS = new Set(["check", "gh"]);
+
+// The canonical route for loading a skill: "(through your skill tool, `/x`, or by
+// reading its SKILL.md)". `/x` is what a user types, so it must name a skill, and the
+// one the sentence loads. `[\s>]` lets the phrase wrap, inside a blockquote too.
+const TYPED_ROUTE = /\((?:each[\s>]+)?through[\s>]+your[\s>]+skill[\s>]+tool,[\s>]+((?:`\/[^`\s]+`(?:[\s>]+and[\s>]+)?)+),?[\s>]+or[\s>]+by[\s>]+reading/g;
+const PLACEHOLDER_ROUTE = /^<[a-z-]+>$/;
+const KEBAB_TOKEN = /`([a-z0-9]+(?:-[a-z0-9]+)*)`/g;
+
+// Credits are two keys, so one string cannot mix them. `credits` names a source whose
+// text was copied or adapted: it needs the source's URL and that URL's NOTICE section.
+// `ideas` names a book, a method, or a skill read but not adapted: no NOTICE section.
+const IDEAS_PREFIX = /^Ideas from /;
+const ADAPTED_WORDS = /\b(adapted|copied)\b/i;
 const URL = /https?:\/\/[^\s),;]+/g;
 
 // The source URLs NOTICE carries a licence section for: each section's header line
@@ -125,6 +139,16 @@ for (const dir of targets) {
   if (typeof fm.description !== "string" || !fm.description.trim()) fail(file, "description is required");
   else if (fm.description.length > 1024) fail(file, `description is ${fm.description.length} chars; the cap is 1024`);
 
+  // A description's routes, "(use `x`)" or "(`x`, then `y`)", send the router to
+  // another skill, so every backticked kebab-case name in it must be one.
+  if (typeof fm.description === "string") {
+    for (const [, n] of fm.description.matchAll(KEBAB_TOKEN)) {
+      if (!allSkills.has(n) && !DESCRIPTION_NON_SKILLS.has(n)) {
+        fail(file, `description names \`${n}\`, which is not a skill in this catalog; fix the route, or, if \`${n}\` is a CLI or file and not a skill, add it to DESCRIPTION_NON_SKILLS in scripts/validate.mjs`);
+      }
+    }
+  }
+
   for (const key of Object.keys(fm)) {
     if (!SPEC_KEYS.has(key) && !EXTRA_KEYS.has(key)) fail(file, `frontmatter key "${key}" is neither spec nor an allowed extra`);
   }
@@ -132,6 +156,9 @@ for (const dir of targets) {
   // skill with the boolean `internal: true` only when it is named with --skill, which is
   // how an incubating skill stays out of a bare install. Nowhere else may hide a skill.
   const incubating = relative(repo, dir).split(/[\\/]/)[1] === "_incubating";
+  if (incubating && (fm.metadata === null || typeof fm.metadata !== "object" || !("internal" in fm.metadata))) {
+    fail(file, "an incubating skill must set metadata.internal: true (the boolean), so a bare `npx skills add` leaves it out until it is promoted");
+  }
   if (fm.metadata !== undefined) {
     if (typeof fm.metadata !== "object" || fm.metadata === null || Array.isArray(fm.metadata)) fail(file, "metadata must be a map");
     else for (const [k, v] of Object.entries(fm.metadata)) {
@@ -172,15 +199,39 @@ for (const dir of targets) {
         fail(`${f}:${whole.slice(0, m.index).split("\n").length}`, `refers to the \`${n}\` skill, which is not in this catalog`);
       }
     }
+    for (const m of whole.matchAll(TYPED_ROUTE)) checkTypedRoute(whole, m, `${f}:${whole.slice(0, m.index).split("\n").length}`);
   }
 
-  // A derived skill names its source; NOTICE carries the source's licence. An ideas-only
-  // credit says so with its marker, so a forgotten licence cannot pass as one.
-  const credits = fm.metadata?.credits;
-  if (typeof credits === "string" && !IDEAS_ONLY.test(credits)) {
-    const urls = (credits.match(URL) ?? []).map((u) => u.replace(/[.]$/, ""));
-    if (!urls.length) fail(file, `metadata.credits names no source URL; give one, or open it with "Ideas from " for a credit of ideas alone`);
-    for (const u of urls) if (!licensed.has(u)) fail(file, `metadata.credits names ${u}, but NOTICE has no section for it; add the source's licence there, or open the credit with "Ideas from " if no text was adapted`);
+  // A derived skill names its source; NOTICE carries the source's licence.
+  const md = fm.metadata && typeof fm.metadata === "object" ? fm.metadata : {};
+  if (typeof md.credits === "string") {
+    const urls = (md.credits.match(URL) ?? []).map((u) => u.replace(/[.]$/, ""));
+    if (IDEAS_PREFIX.test(md.credits)) fail(file, `metadata.credits opens with "Ideas from "; a credit for ideas alone (no text copied or adapted) goes in metadata.ideas, which needs no NOTICE section`);
+    else if (!urls.length) fail(file, "metadata.credits names no source URL; give the URL of the project the text was adapted from, or, if no text was adapted, move the credit to metadata.ideas");
+    for (const u of urls) if (!licensed.has(u)) fail(file, `metadata.credits names ${u}, but NOTICE has no section whose header ends with that URL; add the source's licence there, or, if no text was adapted from it, move the credit to metadata.ideas`);
+  }
+  if (typeof md.ideas === "string" && ADAPTED_WORDS.test(md.ideas)) {
+    fail(file, "metadata.ideas says text was adapted or copied; that part of the credit goes in metadata.credits, with the source's URL and a NOTICE section");
+  }
+}
+
+// "(through your skill tool, `/x`, or by reading its SKILL.md)": each typed `/x` must be
+// a skill, and one the sentence names in backticks before the parenthesis. A sentence
+// that names none ("load it") is read with the rest of its paragraph. `/<name>` is a
+// placeholder for a list given around it, and is left alone.
+function checkTypedRoute(whole, m, at) {
+  const after = (text, re) => text.slice(Math.max(0, ...[...text.matchAll(re)].map((s) => s.index + s[0].length)));
+  const paragraph = after(whole.slice(0, m.index), /\n[ \t>]*\n/g);
+  const sentence = after(paragraph, /[.!?][\s>]+/g);
+  const named = (text) => [...text.matchAll(KEBAB_TOKEN)].map((t) => t[1]);
+  const names = named(sentence).length ? named(sentence) : named(paragraph);
+  for (const [, typed] of m[1].matchAll(/`\/([^`]+)`/g)) {
+    if (PLACEHOLDER_ROUTE.test(typed)) continue;
+    if (!allSkills.has(typed) && !INVENTED_SKILLS.has(typed)) {
+      fail(at, `the typed route \`/${typed}\` names no skill in this catalog; a user typing it reaches nothing, or a harness built-in. Use the loaded skill's name`);
+    } else if (!names.includes(typed)) {
+      fail(at, `the typed route \`/${typed}\` does not match the skill this sentence loads (${names.length ? names.map((n) => `\`${n}\``).join(", ") : "none named in backticks"}); the route and the name must agree`);
+    }
   }
 }
 

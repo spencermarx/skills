@@ -60,8 +60,8 @@ for (const [label, name, md, pattern] of breaks) {
   });
 }
 
-// Credits: a credit naming a source needs that source's licence section in NOTICE, and
-// only a credit marked "Ideas from " may go without one.
+// Credits: metadata.credits needs its source's licence section in NOTICE; a credit for
+// ideas alone goes in metadata.ideas (more cases in validate.test.mjs).
 const SRC = "https://github.com/example/skills";
 const credited = (name, credit) => skill(name, "x", `metadata:\n  credits: "${credit}"\n`);
 
@@ -70,18 +70,19 @@ test("accepts a credit whose source has a NOTICE section", () => {
   assert.ok(r.ok, r.out);
 });
 
-test("accepts an ideas-only credit with no NOTICE section", () => {
+test("rejects: a credits value marked as ideas alone", () => {
   const r = validateFixture("cred-ideas", credited("cred-ideas", `Ideas from Example's x skill (${SRC}), not vendored`));
-  assert.ok(r.ok, r.out);
+  assert.ok(!r.ok, "an ideas-only credit under metadata.credits was accepted");
+  assert.match(r.out, /goes in metadata\.ideas/);
 });
 
 test("rejects: a credit whose source has no NOTICE section", () => {
   const r = validateFixture("cred-nonotice", credited("cred-nonotice", `Adapted from Example's x skill, ${SRC} (MIT)`), {}, { noticeText: `${notice("https://github.com/other/skills")}\nMentions ${SRC} in passing.\n` });
   assert.ok(!r.ok, "a credit without a NOTICE section was accepted");
-  assert.match(r.out, /NOTICE has no section for it/);
+  assert.match(r.out, /NOTICE has no section whose header ends with that URL/);
 });
 
-test("rejects: a credit that names no source and is not marked ideas-only", () => {
+test("rejects: a credit that names no source", () => {
   const r = validateFixture("cred-nourl", credited("cred-nourl", "Adapted from a skill somewhere"));
   assert.ok(!r.ok, "a credit with no source was accepted");
   assert.match(r.out, /names no source URL/);
