@@ -94,7 +94,7 @@ No skill hardcodes where a repository keeps things. The `setup-aclarify-skills` 
 |---|---|---|
 | `docs/agents/issue-tracker.md` | where issues live and how to create, read and label them | triage, wayfinder, to-questionnaire, handoff, prototype, arch-board, ceo-review, strategic-brief, session-retro |
 | `docs/agents/triage-labels.md` | the label string for each triage role | triage |
-| `docs/agents/domain.md` | glossary file name and layout, decision-record folder | context, domain-modeling, decision-record, grill-with-docs, conveying-clearly, handoff, prototype, arch-board, tdd, triage, standards, add-standard |
+| `docs/agents/domain.md` | glossary file name and layout, decision-record folder | ubiquitous-language, domain-modeling, decision-record, grill-with-docs, conveying-clearly, handoff, prototype, arch-board, tdd, triage, standards, add-standard |
 | `docs/agents/workspace.md` | scratch folder, conventions folder, brand kit, eval cases folder, code review, checks before commit | most skills: every skill that writes scratch files, follows house rules or reads the brand. `grep -rl docs/agents/workspace skills` lists them |
 
 The first three use the file names and formats of

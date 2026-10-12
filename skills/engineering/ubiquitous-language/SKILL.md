@@ -1,5 +1,5 @@
 ---
-name: context
+name: ubiquitous-language
 description: >-
   Create or edit a repository's glossary file, the ubiquitous language of one bounded
   context, or the map that indexes several. Use whenever a glossary file must be
@@ -15,7 +15,7 @@ metadata:
   credits: "Adapted from Matt Pocock's domain-modeling skill, https://github.com/mattpocock/skills (MIT)"
 ---
 
-# Context
+# Ubiquitous Language
 
 A glossary is the record of a bounded context's **ubiquitous language**: the
 canonical term for each domain concept, what it is, and the words to avoid. It

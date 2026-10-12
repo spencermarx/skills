@@ -60,7 +60,7 @@
     query: scaffold a glossary for this repo
   assert:
     - type: skill-used
-      value: context
+      value: ubiquitous-language
     - type: not-skill-used
       value: domain-modeling
 - description: which terms matter
@@ -70,4 +70,4 @@
     - type: skill-used
       value: domain-modeling
     - type: not-skill-used
-      value: context
+      value: ubiquitous-language

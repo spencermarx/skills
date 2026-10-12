@@ -79,7 +79,7 @@ skill works without it, on stated defaults.
 - `arch-board`: convene a board of expert personas that investigates a design fork, debates it and returns a cited verdict with dissents kept.
 - `tdd`: a test-first red-green loop at agreed seams, producing behaviour tests that survive refactors.
 - `triage`: move issues and outside pull requests through triage states to an agent-ready brief.
-- `context`: write and maintain a repository's glossary files and their map, without ever overwriting one.
+- `ubiquitous-language`: write and maintain a repository's glossary files and their map, without ever overwriting one.
 
 ### Writing
 

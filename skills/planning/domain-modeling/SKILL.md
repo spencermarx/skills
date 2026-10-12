@@ -1,6 +1,6 @@
 ---
 name: domain-modeling
-description: Build and sharpen a project's domain model while designing. Use when the user wants to pin down domain terminology or a ubiquitous language, uses a vague or overloaded word, notices a term being used two ways, says the code and the language disagree, or when a significant design decision surfaces that may deserve a record, and when another skill needs to maintain the domain model. Owns the judgment of which terms matter and whether the language is right. Do NOT use to scaffold, format or restructure the glossary file (use `context`), merely to read the glossary for vocabulary, or to author the decision record itself (use `decision-record`).
+description: Build and sharpen a project's domain model while designing. Use when the user wants to pin down domain terminology or a ubiquitous language, uses a vague or overloaded word, notices a term being used two ways, says the code and the language disagree, or when a significant design decision surfaces that may deserve a record, and when another skill needs to maintain the domain model. Owns the judgment of which terms matter and whether the language is right. Do NOT use to scaffold, format or restructure the glossary file (use `ubiquitous-language`), merely to read the glossary for vocabulary, or to author the decision record itself (use `decision-record`).
 metadata:
   credits: "Adapted from Matt Pocock's domain-modeling skill, https://github.com/mattpocock/skills (MIT)"
 ---
@@ -20,9 +20,9 @@ Read the glossary before you challenge any term. If none exists, that is normal:
 
 ## Writing the glossary down
 
-This skill decides what goes in the glossary; the `context` skill owns how it is written: the file's name and place, its sections, the map, and the links that must change with it. Before your first write in a session, load the `context` skill (through your skill tool, `/context`, or by reading its SKILL.md) and write through it.
+This skill decides what goes in the glossary; the `ubiquitous-language` skill owns how it is written: the file's name and place, its sections, the map, and the links that must change with it. Before your first write in a session, load the `ubiquitous-language` skill (through your skill tool, `/ubiquitous-language`, or by reading its SKILL.md) and write through it.
 
-If `context` is not installed, write the entry yourself in the existing file's own shape. With no file yet, create the one the configuration names (default `GLOSSARY.md` at the root) with a `# {Context name}` heading, a one- or two-sentence description of the context, and a `## Language` section of entries: the term in bold followed by a colon, a one- or two-sentence definition of what it is, and an `_Avoid_:` line listing the synonyms it replaces. Never overwrite an existing glossary; edit it in place. Anything beyond that (relationships, open questions, a map for several contexts) is the `context` skill's, so suggest the user install it once a second context appears.
+If `ubiquitous-language` is not installed, write the entry yourself in the existing file's own shape. With no file yet, create the one the configuration names (default `GLOSSARY.md` at the root) with a `# {Context name}` heading, a one- or two-sentence description of the context, and a `## Language` section of entries: the term in bold followed by a colon, a one- or two-sentence definition of what it is, and an `_Avoid_:` line listing the synonyms it replaces. Never overwrite an existing glossary; edit it in place. Anything beyond that (relationships, open questions, a map for several contexts) is the `ubiquitous-language` skill's, so suggest the user install it once a second context appears.
 
 ## Which terms earn an entry
 
