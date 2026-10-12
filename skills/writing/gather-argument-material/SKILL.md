@@ -57,11 +57,11 @@ The first write is a single H1 holding a working title and nothing else. No
 metadata, no table of contents, no date. The title can change later.
 
 **Appending from an isolated session.** Where your file-editing tools are
-refused against the main checkout, append with a plain shell redirect against
-the file's absolute path. The `scratchpad` skill's `place` verb refuses to
-overwrite, so it cannot serve a file that grows every turn; its
-`references/writing-into-a-locked-entry.md`, section "A loop that appends every
-turn", has the reasoning.
+refused against the main checkout, append to the file this skill created in its
+scratch entry, `fragments.md`, with a plain shell redirect against its absolute
+path, and write no other file that way. Such isolation fences the file-editing
+tools, not the shell, and a move-once helper such as `scratchpad`'s `place`
+refuses to overwrite, so it cannot serve a file that grows every turn.
 
 ## 2. Interview, and append
 

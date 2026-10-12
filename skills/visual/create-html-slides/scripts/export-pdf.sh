@@ -13,6 +13,7 @@
 #
 # The runtime lives in $CREATE_HTML_SLIDES_RUNTIME, default
 # ${XDG_CACHE_HOME:-$HOME/.cache}/create-html-slides, outside any repository.
+# Chromium itself goes to Playwright's per-user browser cache.
 #
 # Exit codes: 0 done or ready; 1 bad arguments or a failed precondition, on stderr;
 # 3 the runtime is not installed.
@@ -20,7 +21,9 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNTIME="${CREATE_HTML_SLIDES_RUNTIME:-${XDG_CACHE_HOME:-$HOME/.cache}/create-html-slides}"
-PLAYWRIGHT_SPEC="playwright@1"
+# The same minor version the whiteboard skill locks, so a user with both shares one
+# Chromium build in Playwright's cache.
+PLAYWRIGHT_SPEC="playwright@~1.63.0"
 
 die() { echo "export-pdf.sh: $*" >&2; exit 1; }
 

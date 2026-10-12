@@ -61,7 +61,7 @@ test("check: no runtime is exit 3 with both install commands, and installs nothi
   const { sh, runtime } = setup();
   const r = sh("check");
   assert.equal(r.status, 3, r.stderr);
-  assert.ok(r.stdout.includes(`npm install --prefix "${runtime}" playwright@1`), r.stdout);
+  assert.ok(r.stdout.includes(`npm install --prefix "${runtime}" playwright@~1.63.0`), r.stdout);
   assert.ok(r.stdout.includes(`"${runtime}/node_modules/.bin/playwright" install chromium`), r.stdout);
   assert.equal(existsSync(runtime), false, "check must not create the runtime");
 });
@@ -147,7 +147,7 @@ chmod +x "$prefix/node_modules/.bin/playwright"
   const r = spawnSync("bash", [script, "install"], { encoding: "utf8", env: { ...env, PATH: `${bin}:${env.PATH}` }, cwd: root });
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(readFileSync(npmLog, "utf8").trim().split("\n"), [
-    `npm install --prefix ${runtime} playwright@1`,
+    `npm install --prefix ${runtime} playwright@~1.63.0`,
     "playwright install chromium",
   ]);
   assert.equal(r.stdout.trim(), `installed: ${runtime}`);

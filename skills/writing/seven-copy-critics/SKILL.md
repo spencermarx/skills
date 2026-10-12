@@ -35,9 +35,10 @@ defaults below and suggest the user run the `setup-aclarify-skills` skill.
 - **Conventions folder** (`docs/agents/workspace.md`): house rules. Default:
   none. If one is configured and holds a voice, tone, brand-voice or
   writing-standards document, read it before the rebuild and obey it; where it
-  is stricter or more specific than this skill, it wins. With none, the rebuild
-  follows the [House style constraints](#house-style-constraints) below and adds
-  no house style of its own.
+  is stricter or more specific than this skill, or contradicts one of the
+  [review constraints](#review-constraints), it wins. With none, the rebuild
+  follows the review constraints, which are part of the method: each states the
+  reader failure it prevents. The skill adds no voice, tone or brand of its own.
 
 ## When to use
 
@@ -142,8 +143,9 @@ The rebuild must:
 2. Fix root causes, not just symptoms
 3. Not introduce new failures across other critics (re-check mentally)
 4. Be the same length or shorter than the original
-5. Comply with the [House style constraints](#house-style-constraints) below and
-   with the conventions folder's house rules, where one is configured
+5. Comply with the [review constraints](#review-constraints) below and with the
+   conventions folder's house rules, where one is configured; where the two
+   conflict, the folder wins
 6. Invent nothing: no number, name, result or quotation the draft or the user
    did not supply. Where a fix needs a specific the draft lacks, mark the gap
    and ask the user for it
@@ -197,27 +199,36 @@ so the same patterns do not reappear in the next draft.
 In [references/output-template.md](references/output-template.md). Load it
 before writing the report.
 
-## House style constraints
+## Review constraints
 
-The rebuilt copy obeys the conventions folder's house rules where one is
-configured (see [Configuration](#configuration)). On top of them, this review
-adds constraints of its own:
+Five constraints the rebuild is checked against, each because breaking it is a
+failure the critics above keep finding in cold readers. They are review method,
+not house style. Where the conventions folder (see
+[Configuration](#configuration)) states a rule that contradicts one, the
+folder's rule wins: drop that constraint for this review and say so in the
+report.
 
 - **No recapping the recipient's own business** in follow-up emails. Reference
-  shared ideas or next steps instead.
+  shared ideas or next steps instead. They know their business better than the
+  sender, so a recap spends their attention on nothing new.
 - **No parroting call notes.** Focus on what is next, not what was said.
+  Repeating the call proves only that someone listened; the reader needs the
+  next step.
 - **Dream outcome leads, mechanism explains.** Lead with what the customer
-  gets (more bookings, less churn), not how the product works.
+  gets (more bookings, less churn), not how the product works. A cold reader
+  decides whether to keep reading on the outcome; the mechanism matters only
+  once they want it.
 - **Literal-first imagery.** If the copy references visuals, they must depict
-  specific moments from the post content, not abstract metaphors.
+  specific moments from the post content, not abstract metaphors. An abstract
+  image gives the Visual Reader nothing to recognise, so it stops no one.
 - **Author conviction required.** If the draft goes out under a person's own
   name, the rebuilt copy must contain at least one sentence expressing a belief,
   opinion, or conviction that person holds. Take it from the draft or ask them
-  for it; never supply one. Information-only posts that never take a position
-  fail the validation pass regardless of how the other critics score it.
+  for it; never supply one. A bylined post that takes no position reads as
+  generated, which is exactly what the Operator-Voice Detector catches.
 
-A rebuild that violates any of these is an automatic FAIL on the validation
-pass, regardless of how the critics score it.
+A rebuild that breaks a constraint still in force fails the validation pass,
+however the critics score it.
 
 ---
 
