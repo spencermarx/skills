@@ -77,12 +77,13 @@ committed to this repository unless the user asks.
    wants rewriting, edit that block in place and leave the rest alone.
 6. **Loop 4 to 5 until the user says it is done.**
 
-**Appending from an isolated session.** Where your file-editing tools are
-refused against the main checkout, append to the file this skill created in its
-scratch entry, `piece.md`, with a plain shell redirect against its absolute path,
-and write no other file that way. Such isolation fences the file-editing tools,
-not the shell, and a move-once helper such as `scratchpad`'s `place` refuses to
-overwrite, so it cannot serve a file that grows every turn.
+**When you cannot write the piece.** Some harnesses lock a background or
+isolated session out of the main checkout, where the scratch entry lives. If you
+cannot write `piece.md` from this session, return each block in your reply
+instead, and say that it belongs at the end of `piece.md`, giving that file's
+absolute path, so the user can add it. Never reach the file through another
+channel once a write is refused. `scratchpad`'s `place` verb is no help here: it
+refuses to overwrite, so it cannot serve a file that grows every turn.
 
 ## What a block is
 

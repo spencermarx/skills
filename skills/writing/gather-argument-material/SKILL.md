@@ -56,12 +56,13 @@ Outside a git repository, ask the user once where to save the file.
 The first write is a single H1 holding a working title and nothing else. No
 metadata, no table of contents, no date. The title can change later.
 
-**Appending from an isolated session.** Where your file-editing tools are
-refused against the main checkout, append to the file this skill created in its
-scratch entry, `fragments.md`, with a plain shell redirect against its absolute
-path, and write no other file that way. Such isolation fences the file-editing
-tools, not the shell, and a move-once helper such as `scratchpad`'s `place`
-refuses to overwrite, so it cannot serve a file that grows every turn.
+**When you cannot write the fragments.** Some harnesses lock a background or
+isolated session out of the main checkout, where the scratch entry lives. If you
+cannot write `fragments.md` from this session, return each fragment in your
+reply instead, and say that it belongs at the end of `fragments.md`, giving that
+file's absolute path, so the user can add it. Never reach the file through
+another channel once a write is refused. `scratchpad`'s `place` verb is no help
+here: it refuses to overwrite, so it cannot serve a file that grows every turn.
 
 ## 2. Interview, and append
 
