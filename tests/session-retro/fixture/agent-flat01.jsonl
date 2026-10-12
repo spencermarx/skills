@@ -1,0 +1,1 @@
+{"type": "assistant", "sessionId": "11111111-1111-1111-1111-111111111111", "requestId": "req-3", "isSidechain": true, "gitBranch": "main", "timestamp": "2026-09-05T00:00:00.000Z", "message": {"id": "msg_req-3", "content": [{"type": "tool_use", "id": "call-c", "name": "Grep", "input": {"pattern": "p", "path": "."}}]}}
