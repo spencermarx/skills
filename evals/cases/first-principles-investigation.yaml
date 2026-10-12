@@ -1,0 +1,82 @@
+# first-principles-investigation: does it fire when nobody can explain a behaviour,
+# and stay quiet when the plan or the fix is the question?
+#
+# Run from the catalog root (costs money; see the harness-eval skill):
+#
+#   bash skills/harness/harness-eval/scripts/run.sh --skills skills evals/cases/first-principles-investigation.yaml --repeat 3
+
+- description: how the code really behaves, not what the docs say
+  vars:
+    query: >-
+      I keep getting confused about which .env file our config loader actually reads for a
+      given app and environment, and what wins when a variable is defined in more than one
+      place. Get to the bottom of how the precedence really works. I don't trust the docs;
+      I want to know what the code does.
+  assert:
+    - type: skill-used
+      value: first-principles-investigation
+
+- description: an intermittent bug under load, with the code in hand
+  vars:
+    query: >-
+      Our review-submission endpoint intermittently attributes a review to the wrong
+      organisation, but only under load. Rows get inserted with an org id that belongs to
+      a different concurrent request. Here's the handler: a module-level `let
+      currentOrgId` is set from the request body, then we await an existence check and a
+      moderation call, then insert with `org_id: currentOrgId`. Figure out the real root
+      cause.
+  assert:
+    - type: skill-used
+      value: first-principles-investigation
+
+- description: a flaky test, refusing the retry band-aid
+  vars:
+    query: >-
+      CI keeps failing on the same test about one run in five and passes on retry. Root-cause
+      it properly, I don't want another retry band-aid.
+  assert:
+    - type: skill-used
+      value: first-principles-investigation
+
+- description: a fix that did not hold
+  vars:
+    query: >-
+      We fixed the timeout last week and the 504s are back. Something else is going on;
+      find out what.
+  assert:
+    - type: skill-used
+      value: first-principles-investigation
+
+- description: tracing a value to its real origin
+  vars:
+    query: >-
+      Trace where this `tenant_id` value actually comes from by the time it reaches the
+      job queue.
+  assert:
+    - type: skill-used
+      value: first-principles-investigation
+
+- description: near-miss, stress-testing a plan, which is grilling
+  vars:
+    query: Stress-test my plan for migrating the billing service before I start.
+  assert:
+    - type: not-skill-used
+      value: first-principles-investigation
+    - type: skill-used
+      value: grill-me
+
+- description: near-miss, reviewing a diff, which is code review
+  vars:
+    query: Review the diff on this branch for bugs before I open the PR.
+  assert:
+    - type: not-skill-used
+      value: first-principles-investigation
+
+- description: near-miss, the cause is known and only the fix is in question
+  vars:
+    query: >-
+      We know the cause is the missing index on orders.created_at. What's the safest way
+      to add it in production?
+  assert:
+    - type: not-skill-used
+      value: first-principles-investigation

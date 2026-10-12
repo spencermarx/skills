@@ -1,0 +1,53 @@
+# watch-ci: does it fire for watching a pipeline to its conclusion, and stay quiet
+# for writing CI or debugging a local failure?
+#
+# Run from the catalog root (costs money; see the harness-eval skill):
+#
+#   bash skills/harness/harness-eval/scripts/run.sh --skills skills evals/cases/watch-ci.yaml --repeat 3
+
+- description: watching a pushed branch to its result
+  vars:
+    query: >-
+      I just pushed feat/address-autocomplete. Watch CI for this branch and tell me when
+      it's done and whether it passed.
+  assert:
+    - type: skill-used
+      value: watch-ci
+
+- description: a deploy pipeline, watched until it finishes
+  vars:
+    query: Force a staging deploy of the api app and let me know when the rebuild finishes.
+  assert:
+    - type: skill-used
+      value: watch-ci
+
+- description: a background lane waiting on post-merge CI
+  vars:
+    query: >-
+      You're a background lane in a bigger workstream. The post-merge CI on main is
+      running. Wait for it to conclude, then report back to the coordinator whether we're
+      green.
+  assert:
+    - type: skill-used
+      value: watch-ci
+
+- description: a status question on a pull request
+  vars:
+    query: Is CI green yet on PR 412?
+  assert:
+    - type: skill-used
+      value: watch-ci
+
+- description: near-miss, authoring a workflow, not watching one
+  vars:
+    query: Set up a GitHub Actions workflow that runs our tests on every pull request.
+  assert:
+    - type: not-skill-used
+      value: watch-ci
+
+- description: near-miss, a local failure with nothing pushed
+  vars:
+    query: "This unit test fails on my machine but I haven't pushed anything. Why?"
+  assert:
+    - type: not-skill-used
+      value: watch-ci
