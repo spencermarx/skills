@@ -6,8 +6,17 @@
 #   whiteboard.sh status  [--repo DIR] [--scratch DIR]   is it installed, and where
 #   whiteboard.sh install [--repo DIR] [--scratch DIR]   install it (no prompt: ask first)
 #   whiteboard.sh path    [--repo DIR] [--scratch DIR]   print the runtime dir, or fail
+#   whiteboard.sh locate  --board FILE [--repo DIR] [--scratch DIR]
+#                                                        print the board's identity and live lock
 #   whiteboard.sh start   --board FILE [--repo DIR] [--scratch DIR]
 #                                                        run the board's server in the foreground
+#
+# Boards: the boards folder is <repo>/<scratch>/whiteboard/. A board is its .tldr file, anywhere
+# in the repository; its room id derives from the file's canonical path, and its lock, chat log,
+# render and server log always live in the boards folder, named by that room id. `locate` prints
+# {board, name, room, lock, messages, png, log, live} as JSON, where `live` is the lock of a
+# running server that holds the board, else null. `start` refuses (exit 4) a board a live server
+# already holds; attach to that server instead.
 #
 # Runtime location, in order of preference:
 #   1. this skill's own folder (app/ and server/), when it is writable;
@@ -17,8 +26,9 @@
 # lockfiles and the app was built from its current sources, so a skill update asks for a fresh
 # install; `install` then redoes only the steps that are stale.
 #
-# Exit codes: 0 installed (status/path), install succeeded, or the server exited cleanly;
-# 3 not installed (status prints what install would run); 1 a precondition failed, on stderr.
+# Exit codes: 0 installed (status/path), located, install succeeded, or the server exited
+# cleanly; 3 not installed (status prints what install would run); 4 the board is already live
+# (start); 2 a bad argument; 1 a precondition failed or the server refused the board, on stderr.
 #
 # Never prompts. The skill asks the person before calling `install`: it downloads the npm
 # packages and Playwright's Chromium (about 150 MB).
@@ -32,7 +42,7 @@ readonly SKILL_DIR
 readonly MIN_NODE="22.12.0"
 
 usage() {
-  sed -n '3,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '3,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
 
@@ -64,6 +74,20 @@ case "$scratch" in
   *) scratch_dir="$repo/${scratch%/}" ;;
 esac
 readonly FALLBACK_DIR="$scratch_dir/whiteboard-runtime"
+readonly BOARDS_DIR="$scratch_dir/whiteboard"
+
+need_board() { # a --board that names a .tldr file
+  [ -n "$board" ] || { echo "whiteboard.sh: $cmd needs --board <path to the board's .tldr>" >&2; exit 2; }
+  case "$board" in
+    *.tldr) ;;
+    *) echo "whiteboard.sh: a board is a .tldr file, not $board" >&2; exit 2 ;;
+  esac
+}
+
+locate_board() { # the board's identity as JSON; exit 0, or 4 when a live server holds it
+  command -v node >/dev/null 2>&1 || { echo "whiteboard.sh: node is required" >&2; exit 1; }
+  node "$SKILL_DIR/server/boards.mjs" "$board" "$BOARDS_DIR"
+}
 
 sources_hash() { # one hash over a runtime's app/ and server/ sources, build output and deps excluded
   (cd "$1" && find app server -type f -not -path '*/node_modules/*' -not -path 'app/dist/*' -print0 \
@@ -191,16 +215,28 @@ case "$cmd" in
     sources_hash "$SKILL_DIR" > "$target/app/dist/.sources-hash"
     echo "installed: $target"
     ;;
+  locate)
+    need_board
+    locate_board || [ $? -eq 4 ]
+    ;;
   start)
-    [ -n "$board" ] || { echo "whiteboard.sh: start needs --board <path to the board's .tldr>" >&2; exit 2; }
+    need_board
+    where="$(locate_board)" && rc=0 || rc=$?
+    if [ "$rc" -eq 4 ]; then
+      echo "whiteboard.sh: this board is already live; attach to it instead of starting another server:" >&2
+      echo "$where" >&2
+      exit 4
+    fi
+    [ "$rc" -eq 0 ] || exit "$rc"
     dir="$(current_install)" || {
       echo "whiteboard.sh: the whiteboard runtime is not installed. Run: whiteboard.sh status" >&2
       exit 3
     }
-    mkdir -p "$(dirname "$board")"
+    mkdir -p "$(dirname "$board")" "$BOARDS_DIR"
     board="$(cd "$(dirname "$board")" && pwd -P)/$(basename "$board")"
     cd "$dir/server"
-    PORT="${PORT:-0}" WHITEBOARD_REPO="$repo" WHITEBOARD_HOME="$(dirname "$board")" WHITEBOARD_BOARD="$board" \
+    # The server repeats the live-lock check itself, which also covers a race with another start.
+    PORT="${PORT:-0}" WHITEBOARD_REPO="$repo" WHITEBOARD_HOME="$BOARDS_DIR" WHITEBOARD_BOARD="$board" \
       exec "$dir/server/node_modules/.bin/tsx" index.ts
     ;;
   *)

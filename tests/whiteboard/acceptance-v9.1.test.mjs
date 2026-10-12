@@ -19,40 +19,25 @@
 // an editor side-effect), so it is not headlessly testable with WHITEBOARD_NO_CANVAS and lives in
 // the manual runbook references/acceptance-v9.1.md instead.
 //
-//   node server/acceptance-v9.1.test.mjs      (run from the skill root)
+//   node tests/whiteboard/acceptance-v9.1.test.mjs
 //
 // Same harness as integration.test.mjs: boots the real bridge over tsx with the render-canvas
-// skipped (WHITEBOARD_NO_CANVAS), ephemeral ports, temp scratch under the repo's .scratchpad. No
-// Chromium, no browser, no reliance on the live :65459 board, no external network. Exit 0 = pass.
+// skipped (WHITEBOARD_NO_CANVAS), ephemeral ports, in this suite's own throwaway repository. No
+// Chromium, no browser, no running board touched, no external network. Exit 0 = pass.
 
-import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { sandbox, startServer, stopServer, stopAllServers } from './harness.mjs';
 
-const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'skills', '_incubating', 'whiteboard');
-const SERVER_DIR = path.join(SKILL_DIR, 'server');
-const TSX = path.join(SERVER_DIR, 'node_modules', '.bin', 'tsx');
+const SB = sandbox('acceptance');
 
-// Mirror the server's repo-root walk to locate HOME = <root>/.scratchpad/whiteboard.
-function repoRoot(start) {
-  let dir = start;
-  for (;;) {
-    if (fs.existsSync(path.join(dir, '.git'))) return dir;
-    const up = path.dirname(dir);
-    if (up === dir) return start;
-    dir = up;
-  }
-}
-const HOME = path.join(repoRoot(SKILL_DIR), '.scratchpad', 'whiteboard');
-fs.mkdirSync(HOME, { recursive: true });
 
 // Distinct board names (own prefix) so this file can run alongside integration.test.mjs without
 // colliding on .tldr / .lock / .messages.jsonl files or room ids.
 const P = 'wbv91_p'; // [v9.1 #43] parseRecipient guard: malformed 400, omitted defaults to lead
 const T = 'wbv91_t'; // [v9.1 #53] teardown seam: request → supervise directive → clears → /done
 const boards = [P, T];
+const ROOM = Object.fromEntries(boards.map((b) => [b, SB.room(SB.board(b))]));
 
 // --- tiny assertion harness (mirrors integration.test.mjs) ------------------
 let passed = 0;
@@ -65,27 +50,11 @@ function eq(actual, expected, msg) {
   ok(actual === expected, `${msg} (got ${JSON.stringify(actual)}, want ${JSON.stringify(expected)})`);
 }
 
-// --- boot a bridge, resolve its port from stdout (identical to integration.test.mjs) ----------
+// --- boot a bridge in this suite's own throwaway repository -----------------
 function boot(board, extraEnv = {}) {
-  const boardPath = path.join(HOME, `${board}.tldr`);
-  const child = spawn(TSX, ['index.ts'], {
-    cwd: SERVER_DIR,
-    env: { ...process.env, PORT: '0', WHITEBOARD_NO_CANVAS: '1', WHITEBOARD_BOARD: boardPath, ...extraEnv },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  const child = startServer(SB, SB.board(board), extraEnv);
   child._board = board;
-  child._port = new Promise((resolve, reject) => {
-    let buf = '';
-    const onData = (d) => {
-      buf += d.toString();
-      const m = buf.match(/WHITEBOARD_PORT=(\d+)/);
-      if (m) { child.stdout.off('data', onData); resolve(Number(m[1])); }
-    };
-    child.stdout.on('data', onData);
-    child.stderr.on('data', (d) => { if (/Error|error:/.test(d.toString())) buf += d.toString(); });
-    child.on('exit', (code) => reject(new Error(`server ${board} exited early (code ${code})\n${buf}`)));
-    setTimeout(() => reject(new Error(`server ${board} never printed a port\n${buf}`)), 20000);
-  });
+  child.kill = (signal = 'SIGTERM') => { void stopServer(child, signal); return true; };
   return child;
 }
 
@@ -130,8 +99,9 @@ async function superviseOrNull(port, sid, ms = 2500) {
 const isTeardown = (dir) => !!dir && (dir.kind === 'teardown' || dir.teardown === true);
 
 function cleanupFiles() {
-  for (const b of boards) for (const ext of ['tldr', 'messages.jsonl', 'lock', 'png']) {
-    fs.rmSync(path.join(HOME, `${b}.${ext}`), { force: true });
+  for (const b of boards) {
+    fs.rmSync(SB.board(b), { force: true });
+    for (const f of Object.values(SB.files(SB.board(b)))) fs.rmSync(f, { force: true });
   }
 }
 
@@ -165,7 +135,7 @@ async function main() {
   // --- omitted → 200, defaults to the lead (recipient absent == the lead, §8.2) ---
   const pOmit = await post(portP, '/message', { text: 'to the lead by default', idempotencyKey: 'p-omit' });
   ok(pOmit.ok === true, 'POST /message with NO recipient is accepted (200)');
-  const pOmitMsg = (await j(portP, `/messages?room=${P}`)).messages.find((m) => m.id === 'p-omit');
+  const pOmitMsg = (await j(portP, `/messages?room=${ROOM[P]}`)).messages.find((m) => m.id === 'p-omit');
   ok(!!pOmitMsg, 'the omitted-recipient Send is stored');
   ok(pOmitMsg && (pOmitMsg.recipient == null || pOmitMsg.recipient.kind === 'lead'),
      'the omitted-recipient Send defaults to the lead (recipient absent or kind:lead)');
@@ -179,7 +149,7 @@ async function main() {
      'POST /message to a registered worker is accepted');
 
   // The rejected (malformed) Sends must never have been stored — 400 before appendMessage.
-  const pIds = new Set((await j(portP, `/messages?room=${P}`)).messages.map((m) => m.id));
+  const pIds = new Set((await j(portP, `/messages?room=${ROOM[P]}`)).messages.map((m) => m.id));
   ok(!pIds.has('p-str') && !pIds.has('p-kind') && !pIds.has('p-noid') && !pIds.has('p-ghost'),
      'no malformed-recipient Send was stored (the 400 fires before the message is appended)');
   srvP.kill('SIGTERM'); await sleep(1300);
@@ -201,16 +171,16 @@ async function main() {
   // baseline: nothing requested, and no chat messages yet.
   const st0 = await j(portT, '/canvas-status');
   ok(!st0.teardownRequested, '/canvas-status reports teardownRequested falsy before any request');
-  const msgs0 = (await j(portT, `/messages?room=${T}`)).messages.length;
+  const msgs0 = (await j(portT, `/messages?room=${ROOM[T]}`)).messages.length;
 
   // the operator presses the close-session control → a distinct teardown-request intake.
-  eq(await postStatus(portT, '/request-teardown', { room: T }),
+  eq(await postStatus(portT, '/request-teardown', { room: ROOM[T] }),
      200, 'POST /request-teardown returns 200');
   const st1 = await j(portT, '/canvas-status');
   eq(st1.teardownRequested, true, '/canvas-status exposes teardownRequested:true after the request');
 
   // it is a control signal, NOT a chat Message — the attributed log is unchanged (§8.2 v9.1).
-  const msgs1 = (await j(portT, `/messages?room=${T}`)).messages.length;
+  const msgs1 = (await j(portT, `/messages?room=${ROOM[T]}`)).messages.length;
   eq(msgs1, msgs0, 'the teardown-request did not enter the chat log (it is a control signal, not a Message)');
 
   // the lead's supervisor poll surfaces the teardown directive. No pending lead Send and no worker
@@ -237,16 +207,14 @@ async function main() {
   const done = await post(portT, '/done', {});
   ok(done.ok === true, 'POST /done (the lead\'s graceful teardown) returns ok');
   await sleep(1200);
-  ok(!fs.existsSync(path.join(HOME, `${T}.lock`)), 'board T lock removed by the graceful /done');
+  ok(!fs.existsSync(SB.files(SB.board(T)).lock), 'board T lock removed by the graceful /done');
 
-  // any straggler + clean scratch
-  for (const s of [srvP, srvT]) { try { s.kill('SIGKILL'); } catch {} }
-  await sleep(200);
   cleanupFiles();
 
   console.log(`\n${failures.length ? 'FAIL' : 'PASS'} — ${passed} checks passed, ${failures.length} failed`);
-  if (failures.length) { for (const f of failures) console.log(`  - ${f}`); process.exit(1); }
-  process.exit(0);
+  if (failures.length) { for (const f of failures) console.log(`  - ${f}`); process.exitCode = 1; }
 }
 
-main().catch((e) => { console.error('\nERROR', e); process.exit(1); });
+main()
+  .catch((e) => { console.error('\nERROR', e); process.exitCode = 1; })
+  .finally(async () => { await stopAllServers(); process.exit(process.exitCode ?? 0); });

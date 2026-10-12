@@ -8,9 +8,7 @@
   },
   "scripts": {
     "start": "tsx index.ts",
-    "typecheck": "tsc --noEmit",
-    "test": "node integration.test.mjs && node sync-corruption.test.mjs",
-    "test:sync-corruption": "node sync-corruption.test.mjs"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@tldraw/state": "^5.4.2",

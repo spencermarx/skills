@@ -5,24 +5,23 @@ harnesses: how the lead is woken when a Send arrives, how a session names itself
 and how a dead worker is revived. This file says what to do in Claude Code, where
 the skill was built and is verified, and what to fall back to elsewhere.
 
-## The wake: a background poller
+## The wake: which listening mode
 
-The lead listens by running `server/poll.sh` as a background job. The poller
-long-polls the bridge, swallows every `204` (re-arms), and on a real delivery
-prints the body to stdout and exits. The harness must resume the session when
-that background job exits, handing it the job's output: that resumption is the
-wake.
+SKILL.md runs the lead's listener, `server/poll.sh`, in one of two modes, and
+gives the loop for each (boot step 7 and step (a′)). Which one you use depends on
+whether the harness resumes a session when a background job exits, handing it the
+job's output: that resumption is the wake.
 
-- **Claude Code:** launch the poller in one shell call with background execution
-  turned on (the shell call's `run_in_background` option). Claude Code re-invokes
-  the session with the poller's stdout when it exits. This is what makes
-  listen-while-interact work: the operator can talk to the lead in the terminal
-  while the poller holds the line.
-- **A harness that cannot resume a session from a background job:** run the poller
-  in the foreground at the end of each turn instead. The lead then cannot converse
-  in the terminal while it listens; tell the operator so at boot. Everything else
-  holds, because delivery is durable: a Send waits in the bridge's queue until a
-  lead takes it.
+- **Claude Code: background resume.** Launch the poller in one shell call with
+  background execution turned on (the shell call's `run_in_background` option).
+  Claude Code re-invokes the session with the poller's stdout when it exits. This
+  is what makes listen-while-interact work: the operator can talk to the lead in
+  the terminal while the poller holds the line.
+- **A harness that cannot resume a session from a background job: foreground.**
+  Run the poller as an ordinary blocking shell call at the end of each turn. It
+  returns only on a delivery. If the harness caps how long a shell call may run
+  and stops it, run it again: a Send that arrived in between waits in the queue
+  and is its first delivery.
 
 ## Who is this session
 

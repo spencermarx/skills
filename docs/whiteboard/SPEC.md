@@ -749,12 +749,16 @@ it is doing.
 - **[v3] The sync server owns it:** `onDataChange` flags the room dirty; a ~2s interval writes
   `room.getCurrentSnapshot()` to the board's `.tldr`; a synchronous flush runs on shutdown.
   **[v5]** Shape `meta` is inside the snapshot, so authorship persists and reloads with the board.
+  **[v9.9]** Only a room that changed since its last write is written, always to a temp file in the
+  board's folder renamed over the board, so a crash never leaves a truncated board.
 - **Home:** `.scratchpad/whiteboard/` (git-ignored; boards are runtime artifacts). Screenshots
-  land here as `<name>.png`. Path overridable.
+  land here as `<room>.png` **[v9.9]** (§8.3). Path overridable.
 - **[v9.6] Homing a live board's file is a copy, not a move (decision #59).** Because the ~2s
   interval keeps the scratchpad `.tldr` **≤~2s-fresh**, a live board's file is homed into tracked
   storage by **`cp`-ing that snapshot to the destination while the server stays up** and committing
-  the copy — the process, its port, its lock, and every peer are untouched. A `git mv` of the live
+  the copy — the process, its port, its lock, and every peer are untouched. **[v9.9]** The copy is a
+  board of its own (its own room, §8.3); to keep working on it, the operator picks it in the panel's
+  board switcher, which moves the server and their browser together. A `git mv` of the live
   file plus a reboot-onto-new-path is a **teardown in disguise** (it drops every peer's unsynced
   edits) and is reserved for an **explicit operator teardown**. This is the fix for the v9.6 incident,
   where a move-then-reboot was used to free a live file and disconnected a collaborator (SKILL §6, §11).
@@ -996,9 +1000,16 @@ side-table, no separate persistence.
 
 - **One process, one board, ephemeral port.** Each `/whiteboard new|open <name>` runs its own
   process bound to `127.0.0.1:0`; it reads the **actually-assigned** port off the listening socket.
+- **[v9.9] One identity per board file.** A board is its `.tldr` file's canonical (realpath)
+  path. Its room id is `<slug of the name>-<hash of the path>` (`server/boards.mjs`), so two files
+  that share a name are two rooms; the base name is display only. Every board's lock, chat log,
+  render and server log live in the boards folder, `<scratch>/whiteboard/`, named by that room id,
+  wherever the `.tldr` itself is; nothing but the board is ever written into a tracked folder.
+  `whiteboard.sh locate --board <file>` prints a board's room id, sidecar paths and live lock.
+  Board paths a request names must be `.tldr` files inside the repository or the boards folder.
 - **Lockfile = discovery + one-server guard.** On boot the process writes
-  `.scratchpad/whiteboard/<name>.lock` = `{ port, pid, board, startedAt, ownerSession?, ownerSessionId? }`,
-  beside `<name>.tldr`. Its jobs: (1) the next `/whiteboard` for that board reads it to find the
+  `<scratch>/whiteboard/<room>.lock` = `{ port, pid, board (the room id), path, name, startedAt,
+  ownerSession?, ownerSessionId? }`. Its jobs: (1) the next `/whiteboard` for that board reads it to find the
   running port and **attach**; (2) it stops a **second server process** from hosting the same board;
   **[v9.6]** (3) it records **whose** session booted the board, so a second session can tell it is a
   guest (below). It is **not** a session limit — any number of agent sessions and human browsers
@@ -1035,6 +1046,13 @@ side-table, no separate persistence.
   full-file `rewriteMessages` on one clobbers the other's appends). The one-server guard makes
   two-processes-on-one-board unreachable in solo-POC use, so the cache stays correct without a
   re-read mechanism; a re-read would guard a state the guard already prevents.
+- **[v9.9] The boot path honors it too.** `whiteboard.sh start` and the server's own boot both
+  refuse (exit 4) a board whose lock has a live foreign owner, so a second `start` never steals the
+  lock. The server also refuses to boot onto a board outside the repository, or one it cannot load.
+- **[v9.9] A board file the server cannot load is refused, never replaced.** Unparseable JSON,
+  tldraw.com's own `{tldrawFileFormatVersion, records}` format, or anything `TLSocketRoom` cannot
+  construct from is a 4xx on the HTTP routes and a refused `/sync/` upgrade; the room is not cached
+  and so never persisted. Only rooms that changed are written, by temp file and rename.
 - **Race caveat (accepted for a solo POC):** two *simultaneous* launches of the same board could
   both boot (the guard's liveness check has a TOCTOU window a single operator does not hit); a
   single operator does not race themselves.

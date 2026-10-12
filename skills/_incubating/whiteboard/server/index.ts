@@ -1,6 +1,7 @@
 #!/usr/bin/env -S npx tsx
 // Whiteboard v4 server (SPEC §3-§8). ONE Node process per board, 127.0.0.1 only, on an
-// OS-assigned ephemeral port (PORT env overrides). Records its port in <name>.lock.
+// OS-assigned ephemeral port (PORT env overrides). Records its port in <room>.lock in the
+// boards folder. Accepts only its own clients: loopback Host, and same-origin when a browser.
 // TypeScript / ESM (NodeNext) / Node 22, run via tsx.
 //
 // Hosts, in one process:
@@ -30,6 +31,9 @@ import { fileURLToPath } from 'node:url';
 import { TLSocketRoom } from '@tldraw/sync-core';
 import { chromium, type Browser, type Page } from 'playwright';
 import { PresenceManager, type PresenceState } from './presence.js';
+import {
+  canonicalBoardPath, displayName, isRoomId, isWithin, liveOwner, readLock, roomIdFor, sidecarPaths,
+} from './boards.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -96,6 +100,9 @@ const REVIVE_GRACE_MS = Number(process.env.WHITEBOARD_REVIVE_GRACE_MS) || 15_000
 const OWNER_SESSION = process.env.WHITEBOARD_OWNER_SESSION || null;       // human-readable CC session name
 const OWNER_SESSION_ID = process.env.WHITEBOARD_OWNER_SESSION_ID || null; // stable CLAUDE_CODE_SESSION_ID
 const APP_DIST = path.resolve(__dirname, '..', 'app', 'dist');
+// A headless-test affordance: no Playwright render-canvas, at boot or on a board switch, so the
+// bridge runs where Chromium is not installed. The skill never sets it.
+const NO_CANVAS = !!process.env.WHITEBOARD_NO_CANVAS;
 
 // --- repo root + scratchpad home (SPEC §8) ---------------------------------
 function findRepoRoot(start: string): string {
@@ -108,26 +115,51 @@ function findRepoRoot(start: string): string {
   }
 }
 
-// The boards' home follows the repository being worked on, never the skill's install folder (a
+// The boards folder follows the repository being worked on, never the skill's install folder (a
 // plugin cache or ~/.agents/skills). The repository is WHITEBOARD_REPO, else the git root of the
-// working directory; the home is WHITEBOARD_HOME, else the board file's own folder, else
-// <repository>/.scratchpad/whiteboard. scripts/whiteboard.sh start sets all three.
-const REPO_ROOT = process.env.WHITEBOARD_REPO ? path.resolve(process.env.WHITEBOARD_REPO) : findRepoRoot(process.cwd());
-const HOME = process.env.WHITEBOARD_HOME
-  ? path.resolve(process.env.WHITEBOARD_HOME)
-  : process.env.WHITEBOARD_BOARD
-    ? path.dirname(path.resolve(process.env.WHITEBOARD_BOARD))
-    : path.join(REPO_ROOT, '.scratchpad', 'whiteboard');
-fs.mkdirSync(HOME, { recursive: true });
+// working directory; the boards folder is WHITEBOARD_HOME, else <repository>/.scratchpad/whiteboard.
+// scripts/whiteboard.sh start sets both. New boards are created in the boards folder, and EVERY
+// board's own files (lock, chat log, render) live there, wherever its .tldr is, so nothing but the
+// board itself is ever written into a tracked folder.
+const REPO_ROOT = canonicalBoardPath(process.env.WHITEBOARD_REPO ? path.resolve(process.env.WHITEBOARD_REPO) : findRepoRoot(process.cwd()));
+const homeDir = process.env.WHITEBOARD_HOME ? path.resolve(process.env.WHITEBOARD_HOME) : path.join(REPO_ROOT, '.scratchpad', 'whiteboard');
+fs.mkdirSync(homeDir, { recursive: true });
+const HOME = canonicalBoardPath(homeDir);
 
-const boardName = (p: string): string => path.basename(p, path.extname(p));
-const imagePathFor = (p: string): string => path.join(HOME, `${boardName(p)}.png`);
+// [SF3] A board is its .tldr file's canonical path; its room id derives from that path
+// (boards.mjs), so two files that share a name are two rooms. `name` is for display only.
+type Board = { path: string; room: string; name: string };
+function boardAt(p: string): Board {
+  const canonical = canonicalBoardPath(p);
+  return { path: canonical, room: roomIdFor(canonical), name: displayName(canonical) };
+}
 
-let activeBoardPath = process.env.WHITEBOARD_BOARD
-  ? path.resolve(process.env.WHITEBOARD_BOARD)
-  : path.join(HOME, 'board.tldr');
-let activeRoomId = boardName(activeBoardPath);
-let latestImagePath = imagePathFor(activeBoardPath);
+// Rooms a client may join: the boot board and every board this process has opened since. A
+// sync join for any other room id is refused, so no request can conjure a board file.
+const boardsByRoom = new Map<string, Board>();
+const joinable = (b: Board): Board => (boardsByRoom.set(b.room, b), b);
+
+// [B2/SF3] A path a request names: relative paths resolve against the repository; the file must
+// be a .tldr inside the repository or the boards folder.
+type BoardPathResult = { ok: true; board: Board } | { ok: false; status: number; error: string };
+function boardFromRequest(raw: unknown): BoardPathResult {
+  if (typeof raw !== 'string' || !raw) return { ok: false, status: 400, error: 'a board path is required' };
+  const board = boardAt(path.resolve(REPO_ROOT, raw));
+  if (path.extname(board.path).toLowerCase() !== '.tldr') {
+    return { ok: false, status: 400, error: `not a board: ${board.path} (a board is a .tldr file)` };
+  }
+  if (!isWithin(REPO_ROOT, board.path) && !isWithin(HOME, board.path)) {
+    return { ok: false, status: 403, error: `outside the repository: ${board.path}` };
+  }
+  return { ok: true, board };
+}
+
+const pngPathFor = (roomId: string): string => sidecarPaths(HOME, roomId).png;
+
+const bootBoard = joinable(boardAt(process.env.WHITEBOARD_BOARD ? path.resolve(process.env.WHITEBOARD_BOARD) : path.join(HOME, 'board.tldr')));
+let activeBoardPath = bootBoard.path;
+let activeRoomId = bootBoard.room;
+let latestImagePath = pngPathFor(activeRoomId);
 
 // [v9.8 §6.1 #61] Export health, surfaced in /canvas-status so the render-stall (a live render-canvas
 // answering export-image with ok:false while the bridge serves a frozen PNG) is observable without
@@ -140,29 +172,21 @@ let lastExportAt: number | null = null;
 let lastImageMtime: number | null = null;
 let lastImageBytes: number | null = null;
 
-const slugToPath = new Map<string, string>([[activeRoomId, activeBoardPath]]);
-
-function pathForRoom(roomId: string): string {
-  const known = slugToPath.get(roomId);
-  if (known) return known;
-  const p = path.join(HOME, `${roomId}.tldr`);
-  slugToPath.set(roomId, p);
-  return p;
-}
-
 console.log(`[bridge] repo root: ${REPO_ROOT}`);
-console.log(`[bridge] scratchpad home: ${HOME}`);
+console.log(`[bridge] boards folder: ${HOME}`);
 console.log(`[bridge] active board: ${activeBoardPath} (room '${activeRoomId}')`);
 
 // --- lockfile: discovery + one-server-per-board guard (SPEC §8.3) [v4] ------
-// `<name>.lock` = { port, pid, board, startedAt, ownerSession?, ownerSessionId? } beside `<name>.tldr`. The next
-// `/whiteboard` for this board reads it to find the running port and attach; it is removed
-// on graceful `/done`/shutdown. Liveness is pid + `/canvas-status`, not the file's presence.
-const lockPathFor = (roomId: string): string => path.join(HOME, `${roomId}.lock`);
+// `<room>.lock` in the boards folder = { port, pid, board (the room id), path, name, startedAt,
+// ownerSession?, ownerSessionId? }. The next `/whiteboard` for this board finds it through
+// `whiteboard.sh locate` and attaches; it is removed on graceful `/done`/shutdown. Liveness is pid
+// + `/canvas-status`, not the file's presence.
+const lockPathFor = (roomId: string): string => sidecarPaths(HOME, roomId).lock;
 
 function writeLock(): void {
   const lock = {
-    port: assignedPort, pid: process.pid, board: activeRoomId, startedAt: Date.now(),
+    port: assignedPort, pid: process.pid, board: activeRoomId, path: activeBoardPath, name: displayName(activeBoardPath),
+    startedAt: Date.now(),
     ...(OWNER_SESSION ? { ownerSession: OWNER_SESSION } : {}),
     ...(OWNER_SESSION_ID ? { ownerSessionId: OWNER_SESSION_ID } : {}),
   };
@@ -174,7 +198,9 @@ function writeLock(): void {
   }
 }
 
+// Removes the lock only while it is ours, so a process never deletes another server's lock.
 function removeLock(roomId: string = activeRoomId): void {
+  if (readLock(lockPathFor(roomId))?.pid !== process.pid) return;
   try {
     fs.rmSync(lockPathFor(roomId), { force: true });
   } catch (e) {
@@ -182,135 +208,123 @@ function removeLock(roomId: string = activeRoomId): void {
   }
 }
 
-// [v8 §8.3] Runtime one-server guard. The boot-time attach-vs-boot check (SPEC §9) lives
-// in the skill; this is its runtime twin, used when the in-app switcher opens another board
-// (`/board/open`). Without it, an in-process room switch steals the target board's lock with
-// no owner check — a split-brain: two processes serve one board, and a parked waiter on one
-// never meets a Send that lands on the other. These helpers answer "is a LIVE FOREIGN process
-// already hosting this board?" so the switch can attach to it instead of stealing it.
-type LockInfo = { port: number; pid: number; board: string; startedAt: number; ownerSession?: string; ownerSessionId?: string };
-
-function readLock(roomId: string): LockInfo | null {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(lockPathFor(roomId), 'utf8')) as Partial<LockInfo>;
-    if (typeof parsed.port === 'number' && typeof parsed.pid === 'number') return parsed as LockInfo;
-  } catch {
-    /* no lock, or unreadable — treated as no owner */
-  }
-  return null;
-}
-
-// process.kill(pid, 0) probes existence without signalling. ESRCH => gone; EPERM => alive but
-// owned by another user (still alive). Liveness of the pid alone is NOT proof of a whiteboard
-// server (a pid can be reused) — the /canvas-status probe below is the real confirmation.
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
-
-// Confirms a live whiteboard server on `port` is serving `roomId` (short-timeout, loopback-only
-// GET /canvas-status; `activeRoom` is exposed there for exactly this). Resolves false on any
-// failure (connection refused = dead/stale owner, wrong room, timeout, bad body) — never throws.
-function probeCanvasStatus(port: number, roomId: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const req = http.get({ host: HOST, port, path: '/canvas-status', timeout: 1000 }, (res) => {
-      if (res.statusCode !== 200) { res.resume(); resolve(false); return; }
-      let raw = '';
-      res.on('data', (c) => (raw += c));
-      res.on('end', () => {
-        try {
-          resolve((JSON.parse(raw) as { activeRoom?: string }).activeRoom === roomId);
-        } catch {
-          resolve(false);
-        }
-      });
-    });
-    req.on('error', () => resolve(false));
-    req.on('timeout', () => { req.destroy(); resolve(false); });
-  });
-}
-
-// The target board's live foreign owner (its port), or null. null covers: no lock; a stale lock
-// (dead pid, or a live pid whose port no longer answers as this board); or the lock is OURS
-// (self — an in-process switch to our own board is safe and is not a foreign steal).
+// [v8 §8.3] Runtime one-server guard, used at boot and when the in-app switcher opens another
+// board (`/board/open`, `/board/new`). Without it a process steals a live board's lock: a
+// split-brain where two processes serve and persist one board, and a parked waiter on one never
+// meets a Send that lands on the other. null: no lock, a stale lock, or the lock is ours.
 async function liveForeignOwner(roomId: string): Promise<{ port: number; pid: number } | null> {
-  const lock = readLock(roomId);
-  if (!lock) return null;
-  if (lock.pid === process.pid) return null;
-  if (!pidAlive(lock.pid)) return null;
-  const live = await probeCanvasStatus(lock.port, roomId);
-  return live ? { port: lock.port, pid: lock.pid } : null;
+  const lock = await liveOwner(HOME, roomId, process.pid);
+  return lock ? { port: lock.port, pid: lock.pid } : null;
 }
 
 // ===========================================================================
 // SYNC SERVER — one TLSocketRoom per board (SPEC §3, §8)
 // ===========================================================================
-type RoomEntry = { room: TLSocketRoom; boardPath: string; dirty: boolean; saving: boolean };
+// `dirty`: the room changed since its file was last written. A room that only loaded is never
+// written. `inflight`: the periodic write under way, which shutdown waits for before its own flush.
+type RoomEntry = { room: TLSocketRoom; boardPath: string; dirty: boolean; inflight: Promise<void> | null };
 const rooms = new Map<string, RoomEntry>();
+
+// [B2] A board file the server cannot load is refused, never replaced: the room is not created,
+// not cached and so never persisted over the file.
+class BoardLoadError extends Error {}
+
+// undefined when the file does not exist yet (a new board); throws BoardLoadError otherwise.
+function readBoardSnapshot(boardPath: string): unknown {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(boardPath, 'utf8');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw new BoardLoadError(`cannot read ${boardPath}: ${(e as Error).message}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new BoardLoadError(`${boardPath} is not valid JSON: ${(e as Error).message}`);
+  }
+  const snap = parsed as { documents?: unknown; store?: unknown; tldrawFileFormatVersion?: unknown } | null;
+  const isObject = (v: unknown): boolean => typeof v === 'object' && v !== null && !Array.isArray(v);
+  if (!isObject(snap) || !(Array.isArray(snap?.documents) || isObject(snap?.store))) {
+    const hint = isObject(snap) && snap?.tldrawFileFormatVersion !== undefined
+      ? " (it is in tldraw.com's file format, which this server does not import)"
+      : '';
+    throw new BoardLoadError(`${boardPath} is not a whiteboard room snapshot${hint}`);
+  }
+  return parsed;
+}
 
 function getOrCreateRoom(roomId: string): RoomEntry {
   const existing = rooms.get(roomId);
   if (existing) return existing;
 
-  const boardPath = pathForRoom(roomId);
-  let initialSnapshot: unknown;
-  if (fs.existsSync(boardPath)) {
-    try {
-      initialSnapshot = JSON.parse(fs.readFileSync(boardPath, 'utf8'));
-    } catch (e) {
-      console.warn(`[sync] failed to read ${boardPath}: ${(e as Error).message} — starting empty`);
-    }
-  }
+  const board = boardsByRoom.get(roomId);
+  if (!board) throw new BoardLoadError(`unknown room '${roomId}'`);
+  const initialSnapshot = readBoardSnapshot(board.path);
 
-  const entry: RoomEntry = { room: null as unknown as TLSocketRoom, boardPath, dirty: false, saving: false };
-  entry.room = new TLSocketRoom({
-    // schema omitted -> defaults to createTLSchema() (default tldraw shapes).
-    ...(initialSnapshot ? { initialSnapshot: initialSnapshot as never } : {}),
-    onDataChange: () => {
-      entry.dirty = true;
-    },
-    onSessionRemoved: (_room: unknown, args: { numSessionsRemaining: number }) => {
-      console.log(`[sync] room '${roomId}': session left, ${args.numSessionsRemaining} remaining`);
-    },
-  });
+  const entry: RoomEntry = { room: null as unknown as TLSocketRoom, boardPath: board.path, dirty: false, inflight: null };
+  try {
+    entry.room = new TLSocketRoom({
+      // schema omitted -> defaults to createTLSchema() (default tldraw shapes).
+      ...(initialSnapshot ? { initialSnapshot: initialSnapshot as never } : {}),
+      onDataChange: () => {
+        entry.dirty = true;
+      },
+      onSessionRemoved: (_room: unknown, args: { numSessionsRemaining: number }) => {
+        console.log(`[sync] room '${roomId}': session left, ${args.numSessionsRemaining} remaining`);
+      },
+    });
+  } catch (e) {
+    throw new BoardLoadError(`${board.path} cannot be loaded as a board: ${(e as Error).message}`);
+  }
+  entry.dirty = false; // loading (and any migration it ran) is not an edit
 
   rooms.set(roomId, entry);
-  console.log(`[sync] room '${roomId}' ready (loaded=${!!initialSnapshot}) -> ${boardPath}`);
+  console.log(`[sync] room '${roomId}' ready (loaded=${!!initialSnapshot}) -> ${board.path}`);
   return entry;
 }
 
+// [B2] Write-to-temp-then-rename in the board's own folder, so a crash mid-write leaves the
+// previous board intact, never a truncated one. The temp name is unique per write.
+let tempSeq = 0;
+const tempPathFor = (target: string): string =>
+  path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.${++tempSeq}.tmp`);
+
 async function persistRoom(roomId: string, entry: RoomEntry): Promise<void> {
-  if (entry.saving) return;
-  entry.saving = true;
+  entry.dirty = false;
+  const body = JSON.stringify(entry.room.getCurrentSnapshot());
+  const tmp = tempPathFor(entry.boardPath);
   try {
-    const snapshot = entry.room.getCurrentSnapshot();
-    await fsp.writeFile(entry.boardPath, JSON.stringify(snapshot));
+    await fsp.writeFile(tmp, body);
+    await fsp.rename(tmp, entry.boardPath);
     console.log(`[sync] persisted room '${roomId}' -> ${entry.boardPath}`);
   } catch (e) {
+    entry.dirty = true;
+    await fsp.rm(tmp, { force: true }).catch(() => undefined);
     console.warn(`[sync] persist failed for '${roomId}': ${(e as Error).message}`);
-  } finally {
-    entry.saving = false;
   }
 }
 
 function persistRoomSync(roomId: string, entry: RoomEntry): void {
+  const tmp = tempPathFor(entry.boardPath);
   try {
-    fs.writeFileSync(entry.boardPath, JSON.stringify(entry.room.getCurrentSnapshot()));
+    fs.writeFileSync(tmp, JSON.stringify(entry.room.getCurrentSnapshot()));
+    fs.renameSync(tmp, entry.boardPath);
+    entry.dirty = false;
     console.log(`[sync] flushed room '${roomId}' -> ${entry.boardPath}`);
   } catch (e) {
+    fs.rmSync(tmp, { force: true });
     console.warn(`[sync] flush failed for '${roomId}': ${(e as Error).message}`);
   }
 }
 
-setInterval(() => {
+const persistTimer = setInterval(() => {
   for (const [roomId, entry] of rooms) {
-    if (entry.dirty) {
-      entry.dirty = false;
-      void persistRoom(roomId, entry);
+    if (entry.dirty && !entry.inflight) {
+      entry.inflight = persistRoom(roomId, entry).finally(() => {
+        entry.inflight = null;
+      });
     }
   }
 }, PERSIST_INTERVAL_MS);
@@ -321,7 +335,7 @@ setInterval(() => {
 // The panel's chat log is durable and attributed. Both flows cross the bridge firsthand
 // (operator Send via /message, agent utterance via /agent-message); each is stored on
 // receipt into an in-memory per-room array and appended to a human-readable JSONL sidecar
-// `<name>.messages.jsonl` beside the board's `.tldr`, reloaded into memory on boot. The
+// `<room>.messages.jsonl` in the boards folder, reloaded into memory on boot. The
 // message `id` == the message's idempotencyKey; a repeat id neither re-stores nor re-emits.
 type MessageAuthor = { kind: 'human' | 'agent'; name: string; sessionId?: string; color?: string };
 
@@ -411,7 +425,7 @@ type TeardownDirective = { teardown: true; room: string };
 const messagesByRoom = new Map<string, Message[]>();
 const messageIdsByRoom = new Map<string, Set<string>>();
 
-const messagesPathFor = (roomId: string): string => path.join(HOME, `${roomId}.messages.jsonl`);
+const messagesPathFor = (roomId: string): string => sidecarPaths(HOME, roomId).messages;
 
 // Load a room's sidecar into memory once (subsequent calls return the live array).
 function loadMessages(roomId: string): Message[] {
@@ -525,7 +539,6 @@ type FrameToApp =
   | { type: 'server-closing'; room: string };
 
 type FrameFromApp =
-  | { type: 'message'; text?: string; selection?: string[] }
   | { type: 'exec-result'; id: string; ok: boolean; result?: unknown; error?: string }
   | {
       type: 'shapes-result';
@@ -553,18 +566,68 @@ type FrameFromApp =
 // ===========================================================================
 // HTTP + WS wiring
 // ===========================================================================
+// [B1] The bridge accepts only its own clients. Binding 127.0.0.1 does not stop the user's own
+// browser: any page can reach a loopback port, browsers apply no CORS to WebSockets, and a
+// rebinding domain can resolve to 127.0.0.1. So every request must name a loopback Host for this
+// port, and one that carries an Origin (every browser request that can change state does) must be
+// this server's own page. Non-browser clients (curl, poll.sh, presence, the tests) send no Origin.
+const ownHosts = (): string[] => [`127.0.0.1:${assignedPort}`, `localhost:${assignedPort}`];
+function clientRefusal(headers: http.IncomingHttpHeaders): string | null {
+  const host = (headers.host ?? '').toLowerCase();
+  if (!ownHosts().includes(host)) return `Host '${headers.host ?? ''}' is not this server`;
+  const origin = headers.origin;
+  if (origin !== undefined && !ownHosts().some((h) => origin.toLowerCase() === `http://${h}`)) {
+    return `Origin '${origin}' is not this server`;
+  }
+  return null;
+}
+
 const app = express();
+app.use((req: Request, res: Response, next: () => void) => {
+  const refusal = clientRefusal(req.headers);
+  if (refusal) {
+    console.warn(`[bridge] refused ${req.method} ${req.url}: ${refusal}`);
+    res.status(403).json({ error: refusal });
+    return;
+  }
+  next();
+});
 app.use(express.json({ limit: '32mb' }));
 app.use((req: Request, _res: Response, next: () => void) => {
   console.log(`[bridge] ${req.method} ${req.url}`);
   next();
 });
 
+// [B1] A control POST that only the bridge's own clients may make. A JSON content-type cannot be
+// sent cross-site without a CORS preflight, which this server never answers.
+function requireJson(req: Request, res: Response, next: () => void): void {
+  if (!/^application\/json\s*(;|$)/i.test(req.get('content-type') ?? '')) {
+    res.status(415).json({ error: 'content-type: application/json required' });
+    return;
+  }
+  next();
+}
+
 const server = http.createServer(app);
 const eventsWss = new WebSocketServer({ noServer: true });
 const syncWss = new WebSocketServer({ noServer: true });
 
+function refuseUpgrade(socket: import('node:stream').Duplex, status: number, reason: string): void {
+  console.warn(`[bridge] refused upgrade: ${reason}`);
+  try {
+    socket.end(`HTTP/1.1 ${status} ${http.STATUS_CODES[status] ?? 'Refused'}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  } catch {
+    /* already gone */
+  }
+  socket.destroy();
+}
+
 server.on('upgrade', (req, socket, head) => {
+  const refusal = clientRefusal(req.headers);
+  if (refusal) {
+    refuseUpgrade(socket, 403, refusal);
+    return;
+  }
   let url: URL;
   try {
     url = new URL(req.url ?? '/', `http://${HOST}:${assignedPort}`);
@@ -577,13 +640,25 @@ server.on('upgrade', (req, socket, head) => {
     const role = url.searchParams.get('role') ?? 'agent';
     eventsWss.handleUpgrade(req, socket, head, (ws) => onEventsConnection(ws, role));
   } else if (pathname.startsWith('/sync/')) {
-    const roomId = decodeURIComponent(pathname.slice('/sync/'.length));
-    if (!roomId) {
-      socket.destroy();
+    let roomId: string;
+    try {
+      roomId = decodeURIComponent(pathname.slice('/sync/'.length));
+    } catch {
+      refuseUpgrade(socket, 400, 'malformed room id');
+      return;
+    }
+    if (!isRoomId(roomId)) {
+      refuseUpgrade(socket, 400, `invalid room id '${roomId}'`);
+      return;
+    }
+    let entry: RoomEntry;
+    try {
+      entry = getOrCreateRoom(roomId);
+    } catch (e) {
+      refuseUpgrade(socket, e instanceof BoardLoadError && /^unknown room/.test(e.message) ? 404 : 422, (e as Error).message);
       return;
     }
     syncWss.handleUpgrade(req, socket, head, (ws) => {
-      const entry = getOrCreateRoom(roomId);
       const syncSessionId = randomUUID();
       try {
         entry.room.handleSocketConnect({ sessionId: syncSessionId, socket: ws });
@@ -740,24 +815,8 @@ function onEventsConnection(ws: WebSocket, role: string): void {
       console.warn('[bridge] non-JSON ws frame ignored');
       return;
     }
+    // A Send enters only through POST /message; the socket carries render-canvas replies.
     switch (msg.type) {
-      case 'message': {
-        // [v5 §8.5] A WS-origin Send must also become a durable stored Message so pending is a
-        // pure projection over the store; store it, then deliver from the stored record.
-        const stored: Message = {
-          id: randomUUID(),
-          room: activeRoomId,
-          ts: Date.now(),
-          author: { kind: 'human', name: 'You' },
-          text: typeof msg.text === 'string' ? msg.text : '',
-          selection: Array.isArray(msg.selection) ? msg.selection.filter((s): s is string => typeof s === 'string') : [],
-        };
-        appendMessage(stored);
-        broadcastToHumans({ type: 'message', message: stored });
-        deliverInstruction(stored);
-        broadcastAgentStatusIfChanged();
-        break;
-      }
       case 'exec-result':
         settlePending(msg.id, null, { ok: msg.ok, result: msg.result, error: msg.error });
         break;
@@ -1256,7 +1315,7 @@ function broadcastMessageState(msg: Message): void {
 // worker (which does not use poll.sh — SKILL §4) re-arms its own long-poll instead.
 function reArmDirectiveFor(recipientId: string): string {
   return recipientId === 'lead'
-    ? 'RE-ARM FIRST — delivering this Send exited the background poller, so your listener is DOWN and the next message will not be heard until you relaunch it. Before acting on the instruction below, your FIRST action must be to relaunch the background poller, server/poll.sh, exactly as you launched it at boot (the skill loop, step (a′)).'
+    ? 'RE-ARM FIRST — delivering this Send exited the background poller, so your listener is DOWN and the next message will not be heard until you relaunch it. Before acting on the instruction below, your FIRST action must be to relaunch the background poller, server/poll.sh, exactly as you launched it at boot (the skill loop, step (a′)). In a harness that cannot resume a session from a background job, do the turn and its ack first, then run poll.sh in the foreground as the last act of the turn.'
     : 'RE-ARM FIRST — before acting on the instruction below, re-issue your long-poll GET /next-instruction?for=<your id>&sessionId=<sid> so the next Send is heard. The for=<your id> param is required: omit it and the endpoint defaults to for=lead, draining the lead\'s queue, not yours. A 204 is a re-arm, not an exit.';
 }
 
@@ -1984,6 +2043,10 @@ app.post('/message', (req: Request, res: Response) => {
 // [v4 §8.2] Panel read model: full history (or the tail after `since`) ascending by ts.
 app.get('/messages', (req: Request, res: Response) => {
   const room = typeof req.query.room === 'string' && req.query.room ? req.query.room : activeRoomId;
+  if (!isRoomId(room)) {
+    res.status(400).json({ error: `invalid room id '${room}'` });
+    return;
+  }
   const sinceRaw = req.query.since;
   const since = typeof sinceRaw === 'string' && sinceRaw !== '' ? Number(sinceRaw) : null;
   const all = loadMessages(room);
@@ -1999,7 +2062,7 @@ app.get('/messages', (req: Request, res: Response) => {
 // parked supervisor (the lead) via serviceWaiters with the teardown directive; if none is parked
 // yet, the next supervise poll surfaces it. Idempotent — setting it twice is a no-op 200. `room`
 // optional: defaults to this process's single active board.
-app.post('/request-teardown', (req: Request, res: Response) => {
+app.post('/request-teardown', requireJson, (req: Request, res: Response) => {
   const { room } = (req.body ?? {}) as { room?: unknown };
   const roomId = typeof room === 'string' && room ? room : activeRoomId;
   setTeardownRequested(roomId);
@@ -2243,7 +2306,7 @@ app.post(
       res.status(400).json({ error: 'expected raw PNG body' });
       return;
     }
-    const outPath = imagePathFor(activeBoardPath);
+    const outPath = pngPathFor(activeRoomId);
     try {
       await fsp.writeFile(outPath, req.body);
       latestImagePath = outPath;
@@ -2316,7 +2379,15 @@ app.post('/snapshot', (_req: Request, res: Response) => {
 });
 
 app.get('/snapshot', async (req: Request, res: Response) => {
-  const target = req.query.path ? path.resolve(String(req.query.path)) : activeBoardPath;
+  let target = activeBoardPath;
+  if (req.query.path !== undefined) {
+    const named = boardFromRequest(req.query.path);
+    if (!named.ok) {
+      res.status(named.status).json({ error: named.error });
+      return;
+    }
+    target = named.board.path;
+  }
   try {
     const raw = await fsp.readFile(target, 'utf8');
     res.json({ document: JSON.parse(raw) });
@@ -2330,40 +2401,57 @@ app.get('/snapshot', async (req: Request, res: Response) => {
 // ===========================================================================
 // BOARD open / new / discovery (SPEC §8)
 // ===========================================================================
-async function switchRoom(roomId: string, boardPath: string): Promise<void> {
+// Loads the target room BEFORE anything switches, so a board that cannot be loaded leaves this
+// process exactly as it was (throws BoardLoadError).
+async function switchRoom(board: Board): Promise<void> {
+  joinable(board);
+  try {
+    getOrCreateRoom(board.room);
+  } catch (e) {
+    if (board.room !== activeRoomId) boardsByRoom.delete(board.room);
+    throw e;
+  }
   const prevRoom = activeRoomId;
-  activeRoomId = roomId;
-  activeBoardPath = boardPath;
-  slugToPath.set(roomId, boardPath);
-  latestImagePath = imagePathFor(boardPath);
+  activeRoomId = board.room;
+  activeBoardPath = board.path;
+  latestImagePath = pngPathFor(board.room);
   // Keep the lockfile pointing at the board this process actually hosts.
-  if (prevRoom !== roomId) removeLock(prevRoom);
+  if (prevRoom !== board.room) removeLock(prevRoom);
   writeLock();
-  getOrCreateRoom(roomId);
-  presence.switchRoom(roomId); // rebuild agent cursors against the new room
-  await navigateRenderCanvas(roomId);
+  presence.switchRoom(board.room); // rebuild agent cursors against the new room
+  await navigateRenderCanvas(board.room);
+}
+
+// [v8 §8.3] One server per board. If a live foreign process already hosts the board, DO NOT switch
+// in-process (that would steal its lock -> split-brain). Hand the client that process's port so it
+// attaches there instead. Unowned / stale-locked / our-own-board => switch in-process.
+async function openBoard(board: Board, res: Response, verb: string): Promise<void> {
+  const reply = { path: board.path, room: board.room, name: board.name };
+  const owner = await liveForeignOwner(board.room);
+  if (owner) {
+    console.log(`[bridge] board ${verb} -> '${board.room}' already live at port ${owner.port} (pid ${owner.pid}); attach, do not steal`);
+    res.json({ ok: true, attach: true, port: owner.port, ...reply });
+    return;
+  }
+  try {
+    await switchRoom(board);
+  } catch (e) {
+    if (!(e instanceof BoardLoadError)) throw e;
+    console.warn(`[bridge] board ${verb} refused: ${e.message}`);
+    res.status(422).json({ error: e.message, ...reply });
+    return;
+  }
+  console.log(`[bridge] board ${verb} -> ${board.path} (room '${board.room}')`);
+  res.json({ ok: true, attach: false, ...reply });
 }
 
 app.post('/board/open', async (req: Request, res: Response) => {
-  const { path: p } = (req.body ?? {}) as { path?: unknown };
-  if (typeof p !== 'string' || !p) {
-    res.status(400).json({ error: 'body.path required' });
+  const named = boardFromRequest((req.body ?? {}).path);
+  if (!named.ok) {
+    res.status(named.status).json({ error: named.error });
     return;
   }
-  const boardPath = path.resolve(p);
-  const roomId = boardName(boardPath);
-  // [v8 §8.3] One server per board. If a live foreign process already hosts this board, DO NOT
-  // switch in-process (that would steal its lock -> split-brain). Hand the client that process's
-  // port so it attaches there instead. Unowned / stale-locked / our-own-board => switch in-process.
-  const owner = await liveForeignOwner(roomId);
-  if (owner) {
-    console.log(`[bridge] board open -> '${roomId}' already live at port ${owner.port} (pid ${owner.pid}); attach, do not steal`);
-    res.json({ ok: true, attach: true, port: owner.port, path: boardPath, room: roomId });
-    return;
-  }
-  await switchRoom(roomId, boardPath);
-  console.log(`[bridge] board open -> ${boardPath} (room '${roomId}')`);
-  res.json({ ok: true, attach: false, path: boardPath, room: roomId });
+  await openBoard(named.board, res, 'open');
 });
 
 app.post('/board/new', async (req: Request, res: Response) => {
@@ -2373,21 +2461,10 @@ app.post('/board/new', async (req: Request, res: Response) => {
     return;
   }
   const safe = name.replace(/[^\w.-]+/g, '-');
-  const boardPath = path.join(HOME, `${safe}.tldr`);
-  // [v8 §8.3] Same one-server guard as /board/open: a "new" board whose name collides with a
-  // live board must attach to that owner, never steal its lock.
-  const owner = await liveForeignOwner(safe);
-  if (owner) {
-    console.log(`[bridge] board new -> '${safe}' collides with a live board at port ${owner.port} (pid ${owner.pid}); attach, do not steal`);
-    res.json({ ok: true, attach: true, port: owner.port, path: boardPath, room: safe });
-    return;
-  }
-  await switchRoom(safe, boardPath);
-  console.log(`[bridge] board new -> ${boardPath} (room '${safe}')`);
-  res.json({ ok: true, attach: false, path: boardPath, room: safe });
+  await openBoard(boardAt(path.join(HOME, `${safe}.tldr`)), res, 'new');
 });
 
-type BoardListing = { name: string; path: string; source: 'home' | 'repo' };
+type BoardListing = { name: string; path: string; room: string; source: 'home' | 'repo' };
 
 async function listHomeBoards(): Promise<BoardListing[]> {
   const out: BoardListing[] = [];
@@ -2398,7 +2475,7 @@ async function listHomeBoards(): Promise<BoardListing[]> {
     /* home may be empty */
   }
   for (const e of entries) {
-    if (e.endsWith('.tldr')) out.push({ name: boardName(e), path: path.join(HOME, e), source: 'home' });
+    if (e.endsWith('.tldr')) out.push({ ...boardAt(path.join(HOME, e)), source: 'home' });
   }
   return out;
 }
@@ -2425,7 +2502,8 @@ app.get('/boards', async (_req: Request, res: Response) => {
   const repoHits: string[] = [];
   await walkForTldr(REPO_ROOT, repoHits);
   for (const full of repoHits) {
-    if (!byPath.has(full)) byPath.set(full, { name: boardName(full), path: full, source: 'repo' });
+    const b = boardAt(full);
+    if (!byPath.has(b.path)) byPath.set(b.path, { ...b, source: 'repo' });
   }
   res.json([...byPath.values()]);
 });
@@ -2763,6 +2841,7 @@ async function launchRenderCanvas(roomId: string): Promise<void> {
 
 async function navigateRenderCanvas(roomId: string): Promise<void> {
   canvasRoom = roomId;
+  if (NO_CANVAS) return;
   if (!canvasPage) {
     await launchRenderCanvas(roomId);
     return;
@@ -2809,6 +2888,8 @@ app.get('/canvas-status', (_req: Request, res: Response) => {
     // navigates, and stays null headless; activeRoom is always set). The runtime one-server guard
     // and its regression test read this to confirm a live owner is serving the board it claims.
     activeRoom: activeRoomId,
+    activeBoard: activeBoardPath,
+    activeName: displayName(activeBoardPath),
     // [v9.6] Identify the CC session that booted this board (mirrors the lock's owner fields) so a
     // guest/second /whiteboard session reads the owner here without re-parsing the lock, and knows it
     // must not tear down a board it did not boot. Null when the board was booted without owner env.
@@ -2851,7 +2932,12 @@ async function shutdown(code = 0): Promise<void> {
   try { broadcastToHumans({ type: 'server-closing', room: activeRoomId }); } catch { /* best effort */ }
   await new Promise((r) => setTimeout(r, 150));
   clearInterval(sweepTimer);
-  for (const [roomId, entry] of rooms) persistRoomSync(roomId, entry);
+  clearInterval(persistTimer);
+  // [SF3] Only rooms that changed are written; a write already under way finishes first.
+  for (const [roomId, entry] of rooms) {
+    if (entry.inflight) await entry.inflight;
+    if (entry.dirty) persistRoomSync(roomId, entry);
+  }
   removeLock();
   presence.closeAll();
   await teardownRenderCanvas();
@@ -2863,7 +2949,7 @@ async function shutdown(code = 0): Promise<void> {
   process.exit(code);
 }
 
-app.post('/done', (_req: Request, res: Response) => {
+app.post('/done', requireJson, (_req: Request, res: Response) => {
   // [v9.1 §9 #53] Defensive cleanup: clear the teardown flag on the graceful close. In the directive
   // path it is already cleared on consumption; this also covers the natural-language-Send fallback,
   // where the lead reaches /done without a directive ever being surfaced.
@@ -2885,6 +2971,26 @@ process.on('uncaughtException', (e) => {
 // ===========================================================================
 app.use('/', express.static(APP_DIST));
 
+// [SF3/B2] Refuse to boot onto a board this process must not host: one outside the repository,
+// one a live server already holds (its lock is never stolen), or one whose file cannot be loaded
+// (it is never overwritten). Each exits before the lock is written or anything is persisted.
+async function refuseBoot(): Promise<void> {
+  const refuse = (code: number, why: string): never => {
+    console.error(`[bridge] refusing to boot: ${why}`);
+    process.exit(code);
+  };
+  if (path.extname(activeBoardPath).toLowerCase() !== '.tldr') refuse(2, `not a board: ${activeBoardPath} (a board is a .tldr file)`);
+  if (!isWithin(REPO_ROOT, activeBoardPath) && !isWithin(HOME, activeBoardPath)) refuse(2, `outside the repository: ${activeBoardPath}`);
+  const owner = await liveForeignOwner(activeRoomId);
+  if (owner) refuse(4, `${activeBoardPath} is already live on port ${owner.port} (pid ${owner.pid}); attach to it instead`);
+  try {
+    getOrCreateRoom(activeRoomId);
+  } catch (e) {
+    refuse(1, (e as Error).message);
+  }
+}
+await refuseBoot();
+
 // [v4 §8.3] Bind 127.0.0.1:0 (OS-assigned) unless PORT overrides; read the real port back.
 server.listen(PORT_OVERRIDE ?? 0, HOST, () => {
   const addr = server.address();
@@ -2895,11 +3001,10 @@ server.listen(PORT_OVERRIDE ?? 0, HOST, () => {
   console.log(`[bridge] bridge WS  ws://${HOST}:${assignedPort}/events`);
   console.log(`[sync]   sync   WS  ws://${HOST}:${assignedPort}/sync/:roomId`);
   writeLock();
-  getOrCreateRoom(activeRoomId);
   // WHITEBOARD_NO_CANVAS skips the Playwright render-canvas — a headless-test affordance
   // for exercising the bridge (messages, discovery, isolation) without launching Chromium.
   // The skill never sets it, so normal boot always brings the render-canvas up.
-  if (process.env.WHITEBOARD_NO_CANVAS) {
+  if (NO_CANVAS) {
     console.log('[canvas] skipped (WHITEBOARD_NO_CANVAS set)');
   } else {
     void launchRenderCanvas(activeRoomId).catch((e) => console.error('[canvas] launch failed:', (e as Error).message));

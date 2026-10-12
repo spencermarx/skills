@@ -40,7 +40,6 @@ import {
   readRole,
   readRoom,
   readSession,
-  roomForBoard,
   syncUrl,
   uploadImage,
   wsUrl,
@@ -1338,16 +1337,18 @@ function App() {
     location.assign(url.toString())
   }, [])
 
+  // Join the room the bridge names. A board it refused (one it cannot load) is never joined.
   const onOpenBoard = useCallback(
     async (entry: BoardEntry) => {
       try {
         const r = await openBoard(entry.path)
         // The board was already live on another process — attach there instead of same-port.
-        if (r.attach && r.port) { gotoBoardAt(r.port, r.room || roomForBoard(entry)); return }
+        if (r.attach && r.port) { gotoBoardAt(r.port, r.room); return }
+        gotoRoom(r.room)
       } catch (err) {
         console.error('open board failed', err)
+        window.alert(`Could not open ${entry.name}: ${(err as Error).message}`)
       }
-      gotoRoom(roomForBoard(entry))
     },
     [gotoRoom, gotoBoardAt],
   )
@@ -1357,11 +1358,12 @@ function App() {
     if (!name) return
     try {
       const r = await newBoard(name)
-      if (r.attach && r.port) { gotoBoardAt(r.port, r.room || roomForBoard({ name, path: '', source: 'new' })); return }
+      if (r.attach && r.port) { gotoBoardAt(r.port, r.room); return }
+      gotoRoom(r.room)
     } catch (err) {
       console.error('new board failed', err)
+      window.alert(`Could not create ${name}: ${(err as Error).message}`)
     }
-    gotoRoom(roomForBoard({ name, path: '', source: 'new' }))
   }, [gotoRoom, gotoBoardAt])
 
   // [v6, SPEC §7, decisions #29/#32/#38] The loud "nobody's home" signal, now per recipient.
@@ -1436,7 +1438,10 @@ function App() {
 
   // [redesign] The current board's display name for the switcher trigger: the boards list entry
   // whose room matches the joined ROOM, else the ROOM slug itself.
-  const currentBoardName = boards.find((b) => roomForBoard(b) === ROOM)?.name ?? ROOM
+  const currentBoard = boards.find((b) => b.room === ROOM)
+  const currentBoardName = currentBoard?.name ?? ROOM
+  // What to type to reopen this board: its name for a board in the boards folder, else its path.
+  const resumeTarget = currentBoard ? (currentBoard.source === 'home' ? currentBoard.name : currentBoard.path) : ROOM
 
   // [v9.1, #53] The panel's "closing…" state: this browser's optimistic latch OR the room-wide
   // flag any browser reads from /canvas-status. It drives the calm closing notice and the
@@ -1551,7 +1556,7 @@ function App() {
                 <ul className="wb-board-menu">
                   {boards.length === 0 && <li className="wb-menu-empty">No boards yet</li>}
                   {boards.map((b) => {
-                    const active = roomForBoard(b) === ROOM
+                    const active = b.room === ROOM
                     return (
                       <li key={b.path || b.name}>
                         <button
@@ -1721,7 +1726,7 @@ function App() {
                 {anyStalled
                   ? 'A collaborator stepped away mid-task. Your message is re-queued and will be picked up when they are back.'
                   : 'No one is on the board yet. Your message is queued and will be delivered when a collaborator joins.'}{' '}
-                Run <code>/whiteboard open {ROOM}</code> to resume.
+                Run <code>/whiteboard open {resumeTarget}</code> to resume.
               </span>
             </div>
           )}

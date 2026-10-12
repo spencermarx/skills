@@ -17,35 +17,21 @@
 //      is observable without byte-diffing the PNG.
 //
 // The render-canvas here is a FAKE ws client joined as role=agent; there is no Playwright and no live
-// board. Every server boots on an ephemeral port (PORT=0) against a wbtest_* board in the worktree's
-// own .scratchpad/whiteboard/ — the live board on port 62919 is never touched.
+// board. Every server boots on an ephemeral port (PORT=0) in this suite's own throwaway repository,
+// so no running board is ever touched.
 //
-//   node server/render-stall.test.mjs      (run from the skill root)
+//   node tests/whiteboard/render-stall.test.mjs
 
-import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { SERVER_DIR, sandbox, startServer, stopAllServers } from './harness.mjs';
 
-const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'skills', '_incubating', 'whiteboard');
-const SERVER_DIR = path.join(SKILL_DIR, 'server');
 // ws comes from the skill's server/node_modules: this suite lives outside the skill folder.
 const { WebSocket } = createRequire(path.join(SERVER_DIR, 'package.json'))('ws');
-const TSX = path.join(SERVER_DIR, 'node_modules', '.bin', 'tsx');
+const SB = sandbox('render-stall');
 
-function repoRoot(start) {
-  let dir = start;
-  for (;;) {
-    if (fs.existsSync(path.join(dir, '.git'))) return dir;
-    const up = path.dirname(dir);
-    if (up === dir) return start;
-    dir = up;
-  }
-}
-const HOME = path.join(repoRoot(SKILL_DIR), '.scratchpad', 'whiteboard');
-fs.mkdirSync(HOME, { recursive: true });
 
 // --- tiny assertion harness -------------------------------------------------
 let passed = 0;
@@ -58,32 +44,10 @@ function eq(actual, expected, msg) {
   ok(actual === expected, `${msg} (got ${JSON.stringify(actual)}, want ${JSON.stringify(expected)})`);
 }
 
-// --- boot a bridge, resolve its port from stdout ----------------------------
-function boot(board, extraEnv = {}) {
-  const boardPath = path.join(HOME, `${board}.tldr`);
-  try { fs.rmSync(boardPath, { force: true }); } catch {}
-  try { fs.rmSync(path.join(HOME, `${board}.messages.jsonl`), { force: true }); } catch {}
-  try { fs.rmSync(path.join(HOME, `${board}.png`), { force: true }); } catch {} // start with NO good frame
-  const child = spawn(TSX, ['index.ts'], {
-    cwd: SERVER_DIR,
-    env: { ...process.env, PORT: '0', WHITEBOARD_NO_CANVAS: '1', WHITEBOARD_BOARD: boardPath, ...extraEnv },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  child._port = new Promise((resolve, reject) => {
-    let buf = '';
-    const onData = (d) => {
-      buf += d.toString();
-      const m = buf.match(/WHITEBOARD_PORT=(\d+)/);
-      if (m) { child.stdout.off('data', onData); resolve(Number(m[1])); }
-    };
-    child.stdout.on('data', onData);
-    child.on('exit', (code) => reject(new Error(`server ${board} exited early (code ${code})\n${buf}`)));
-    setTimeout(() => reject(new Error(`server ${board} never printed a port\n${buf}`)), 20000);
-  });
-  return child;
-}
+// --- boot a bridge in this suite's own throwaway repository -----------------
+const boot = (board, extraEnv = {}) => startServer(SB, SB.board(board), extraEnv);
 
-const boardPng = (board) => path.join(HOME, `${board}.png`);
+const boardPng = (board) => SB.files(SB.board(board)).png;
 const statOrNull = (p) => { try { return fs.statSync(p); } catch { return null; } };
 
 // A GET /image that returns { status, body } instead of throwing, so we can assert on the status code.
@@ -262,12 +226,13 @@ async function main() {
     }
   } finally {
     try { rc.ws.close(); } catch {}
-    server.kill('SIGKILL');
+    await stopAllServers();
   }
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
-  if (failures.length) { for (const f of failures) console.log(`  FAILED: ${f}`); process.exit(1); }
-  process.exit(0);
+  if (failures.length) { for (const f of failures) console.log(`  FAILED: ${f}`); process.exitCode = 1; }
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+main()
+  .catch((e) => { console.error(e); process.exitCode = 1; })
+  .finally(async () => { await stopAllServers(); process.exit(process.exitCode ?? 0); });

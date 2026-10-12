@@ -14,11 +14,10 @@
 // an app dep the server never loads) — everything downstream (push suppression, the reload clearing
 // it, re-hydration) is the real library.
 //
-//   node server/sync-corruption.test.mjs        (run from the skill root)
-//   node sync-corruption.test.mjs               (run from server/)
+//   node tests/whiteboard/sync-corruption.test.mjs
 //
-// Boots the real bridge over tsx with WHITEBOARD_NO_CANVAS (no Playwright), ephemeral ports, temp
-// scratch under the repo's .scratchpad. Exit 0 = pass.
+// Boots the real bridge over tsx with WHITEBOARD_NO_CANVAS (no Playwright), ephemeral ports, in
+// this suite's own throwaway repository. Exit 0 = pass.
 //
 // How it bites: board X runs with the v9.5 guard ON (default) — a poison then a well-formed exec,
 // and the well-formed shape reaches the room via server-owned recovery. Board Y runs the SAME
@@ -27,37 +26,22 @@
 // the honest contract: a silent poison (corrupt-without-throwing) that App.tsx reports ok:true for
 // is reported ok:false by the server, because the write did not reach the room.
 
-import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { SERVER_DIR, sandbox, startServer, stopServer, stopAllServers } from './harness.mjs';
 
-const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'skills', '_incubating', 'whiteboard');
-const SERVER_DIR = path.join(SKILL_DIR, 'server');
+const SB = sandbox('sync-corruption');
 // ws comes from the skill's server/node_modules: this suite lives outside the skill folder.
 const serverRequire = createRequire(path.join(SERVER_DIR, 'package.json'));
 const { WebSocket: WsClient } = serverRequire('ws');
 const fromServer = async (spec) => serverRequire(spec); // test-local objects only, so the CJS build is fine
-const TSX = path.join(SERVER_DIR, 'node_modules', '.bin', 'tsx');
 
-function repoRoot(start) {
-  let dir = start;
-  for (;;) {
-    if (fs.existsSync(path.join(dir, '.git'))) return dir;
-    const up = path.dirname(dir);
-    if (up === dir) return start;
-    dir = up;
-  }
-}
-const HOME = path.join(repoRoot(SKILL_DIR), '.scratchpad', 'whiteboard');
-fs.mkdirSync(HOME, { recursive: true });
 
 const X = 'wbsync_x'; // guard ON: poison → well-formed reaches the room via recovery
 const Y = 'wbsync_y'; // guard OFF: same sequence freezes the board (the bug the fix repairs)
 const Z = 'wbsync_z'; // honest contract: a silent poison the app calls ok:true is reported ok:false
-const boards = [X, Y, Z];
+const ROOM = Object.fromEntries([X, Y, Z].map((b) => [b, SB.room(SB.board(b))]));
 
 // --- browser-global shim (mirrors server/headless-shim.ts) BEFORE any tldraw client code --------
 globalThis.window ??= { addEventListener() {}, removeEventListener() {}, devicePixelRatio: 1 };
@@ -82,26 +66,10 @@ function ok(cond, msg) {
   else { failures.push(msg); console.log(`  ✗ ${msg}`); }
 }
 
-// --- boot a bridge, resolve its port from stdout (mirrors integration.test.mjs) ----------------
+// --- boot a bridge in this suite's own throwaway repository -----------------
 function boot(board, extraEnv = {}) {
-  const boardPath = path.join(HOME, `${board}.tldr`);
-  const child = spawn(TSX, ['index.ts'], {
-    cwd: SERVER_DIR,
-    env: { ...process.env, PORT: '0', WHITEBOARD_NO_CANVAS: '1', WHITEBOARD_BOARD: boardPath, ...extraEnv },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  child._port = new Promise((resolve, reject) => {
-    let buf = '';
-    const onData = (d) => {
-      buf += d.toString();
-      const m = buf.match(/WHITEBOARD_PORT=(\d+)/);
-      if (m) { child.stdout.off('data', onData); resolve(Number(m[1])); }
-    };
-    child.stdout.on('data', onData);
-    child.stderr.on('data', (d) => { if (/Error|error:/.test(d.toString())) buf += d.toString(); });
-    child.on('exit', (code) => reject(new Error(`server ${board} exited early (code ${code})\n${buf}`)));
-    setTimeout(() => reject(new Error(`server ${board} never printed a port\n${buf}`)), 20000);
-  });
+  const child = startServer(SB, SB.board(board), extraEnv);
+  child.kill = (signal = 'SIGTERM') => { void stopServer(child, signal); return true; };
   return child;
 }
 
@@ -254,19 +222,12 @@ async function waitRoomShapes(port, want, ms = 4000) {
   }
 }
 
-function cleanupFiles() {
-  for (const b of boards) for (const ext of ['tldr', 'messages.jsonl', 'lock', 'png']) {
-    fs.rmSync(path.join(HOME, `${b}.${ext}`), { force: true });
-  }
-}
-
 async function main() {
-  cleanupFiles();
 
   // ── Board X: guard ON. Poison then well-formed; the well-formed shape reaches the room. ──────
   const srvX = boot(X);
   const portX = await srvX._port;
-  const fakeX = new FakeCanvas(portX, X);
+  const fakeX = new FakeCanvas(portX, ROOM[X]);
   await fakeX.connect();
   console.log(`\n[X guard ON] port=${portX}`);
 
@@ -292,7 +253,7 @@ async function main() {
   // ── Board Y: guard OFF (pre-v9.5). The SAME sequence freezes the board — this is the bite. ───
   const srvY = boot(Y, { WHITEBOARD_NO_SYNC_GUARD: '1' });
   const portY = await srvY._port;
-  const fakeY = new FakeCanvas(portY, Y);
+  const fakeY = new FakeCanvas(portY, ROOM[Y]);
   await fakeY.connect();
   console.log(`\n[Y guard OFF] port=${portY}`);
 
@@ -308,7 +269,7 @@ async function main() {
   // ── Board Z: honest contract. A silent poison the app reports ok:true → server reports ok:false. ─
   const srvZ = boot(Z);
   const portZ = await srvZ._port;
-  const fakeZ = new FakeCanvas(portZ, Z);
+  const fakeZ = new FakeCanvas(portZ, ROOM[Z]);
   await fakeZ.connect();
   console.log(`\n[Z honest contract] port=${portZ}`);
 
@@ -320,11 +281,10 @@ async function main() {
   srvZ.kill('SIGTERM');
   await sleep(300);
 
-  cleanupFiles();
-
   console.log(`\n${failures.length ? 'FAIL' : 'PASS'} — ${passed} checks passed, ${failures.length} failed`);
-  if (failures.length) { for (const f of failures) console.log(`  - ${f}`); process.exit(1); }
-  process.exit(0);
+  if (failures.length) { for (const f of failures) console.log(`  - ${f}`); process.exitCode = 1; }
 }
 
-main().catch((e) => { console.error('\nERROR', e); process.exit(1); });
+main()
+  .catch((e) => { console.error('\nERROR', e); process.exitCode = 1; })
+  .finally(async () => { await stopAllServers(); process.exit(process.exitCode ?? 0); });

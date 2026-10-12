@@ -54,11 +54,13 @@
 // HTTP endpoints the app CALLS on the bridge:
 //   POST /message   body {text, selection:string[], idempotencyKey, recipient?}  operator Send (human)
 //                   [v6] `recipient` is {kind,id?,name?}; absent == the lead (v5 default).
-//   GET  /boards         → [{name, path, source, room?}]         board discovery
-//   POST /board/open       body {path}                          switch active board
-//   POST /board/new        body {name}                          create empty board
+//   GET  /boards         → [{name, path, source, room}]          board discovery
+//   POST /board/open       body {path}  → {attach, port?, room}  switch active board
+//   POST /board/new        body {name}  → {attach, port?, room}  create empty board
+//        `room` is the server's id for the board (derived from its file path); the app always
+//        joins the room the server names. A board the server cannot load is a 4xx with {error}.
 //   POST /image-upload?id=<id>   raw body, Content-Type image/png   PNG export delivery
-//        (bridge writes the bytes to .scratchpad/whiteboard/<name>.png and owns the
+//        (bridge writes the bytes to <boards folder>/<room>.png and owns the
 //         path; `id` correlates the upload with the exec/export that triggered it.)
 //   POST /request-teardown  body {room}  → {ok:true}                 operator teardown (human)
 //        [v9.1, SPEC §8.2/§8.4, decision #53] The confirm-gated close-session control's
@@ -70,8 +72,7 @@
 //
 // WS /events frames (the render-canvas connects as role=agent, the operator as
 // role=human; the app tags its socket with ?role & ?room):
-//   up   (app→bridge): {type:'message', text, selection}                 (human)
-//                      {type:'store-change', diff:{added,updated,removed}} (shape ids only)
+//   up   (app→bridge): {type:'store-change', diff:{added,updated,removed}} (shape ids only)
 //                      {type:'exec-result', id, ok, result?, error?}      (agent)
 //                      {type:'image', id, ok, error?}                     (agent, upload notice)
 //   down (bridge→app): {type:'exec', id, code, sessionId?,
@@ -180,7 +181,7 @@ export function apiUrl(path: string): string {
   return `${httpOrigin()}${path}`
 }
 
-export type BoardEntry = { name: string; path: string; source: string; room?: string }
+export type BoardEntry = { name: string; path: string; source: string; room: string }
 
 export async function fetchBoards(): Promise<BoardEntry[]> {
   const res = await fetch(apiUrl('/boards'))
@@ -358,7 +359,10 @@ async function postBoard(endpoint: string, body: Record<string, string>): Promis
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
-  if (!res.ok) throw new Error(`POST ${endpoint} ${res.status}`)
+  if (!res.ok) {
+    const why = ((await res.json().catch(() => ({}))) as { error?: string }).error
+    throw new Error(why ?? `POST ${endpoint} ${res.status}`)
+  }
   const b = (await res.json()) as { attach?: boolean; port?: number; room: string }
   return { attach: !!b.attach, port: b.port, room: b.room }
 }
@@ -377,11 +381,4 @@ export async function uploadImage(id: string, blob: Blob): Promise<void> {
     headers: { 'Content-Type': 'image/png' },
     body: blob,
   })
-}
-
-// A board's slug for the ?room= query. The bridge may return an explicit `room`
-// on each BoardEntry; otherwise derive a stable slug from the board name.
-export function roomForBoard(entry: BoardEntry): string {
-  if (entry.room) return entry.room
-  return entry.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'board'
 }

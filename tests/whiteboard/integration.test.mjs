@@ -4,30 +4,13 @@
 // GET /messages read model + since= filter, per-board isolation, and lockfile
 // lifecycle over real HTTP. No Chromium, no browser. Exit 0 = all pass.
 //
-//   node server/integration.test.mjs      (run from the skill root)
+//   node tests/whiteboard/integration.test.mjs
 
-import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { sandbox, startServer, stopServer, stopAllServers } from './harness.mjs';
 
-const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'skills', '_incubating', 'whiteboard');
-const SERVER_DIR = path.join(SKILL_DIR, 'server');
-const TSX = path.join(SERVER_DIR, 'node_modules', '.bin', 'tsx');
-
-// Mirror the server's repo-root walk to locate HOME = <root>/.scratchpad/whiteboard.
-function repoRoot(start) {
-  let dir = start;
-  for (;;) {
-    if (fs.existsSync(path.join(dir, '.git'))) return dir;
-    const up = path.dirname(dir);
-    if (up === dir) return start;
-    dir = up;
-  }
-}
-const HOME = path.join(repoRoot(SKILL_DIR), '.scratchpad', 'whiteboard');
-fs.mkdirSync(HOME, { recursive: true });
+const SB = sandbox('integration');
 
 const A = 'wbtest_a';
 const B = 'wbtest_b';
@@ -48,6 +31,9 @@ const P = 'wbtest_p'; // [v9.2] concurrent in-flight leases: a same-session re-p
 const Q = 'wbtest_q'; // [v9.2] never-stop-listening: a parked waiter spares its lease from the stall sweep; a waiterless holder still reclaims
 const R = 'wbtest_r'; // [v9.3] lead liveness: a live lead is never stalled through the wake→re-arm gap; a confirmed-dead lead re-queues to a new sid
 const boards = [A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R];
+// Each board's room id and its files in the boards folder, as the server derives them.
+const ROOM = Object.fromEntries(boards.map((b) => [b, SB.room(SB.board(b))]));
+const FILES = Object.fromEntries(boards.map((b) => [b, SB.files(SB.board(b))]));
 
 // --- tiny assertion harness -------------------------------------------------
 let passed = 0;
@@ -62,25 +48,10 @@ function eq(actual, expected, msg) {
 
 // --- boot a bridge, resolve its port from stdout ----------------------------
 function boot(board, extraEnv = {}) {
-  const boardPath = path.join(HOME, `${board}.tldr`);
-  const child = spawn(TSX, ['index.ts'], {
-    cwd: SERVER_DIR,
-    env: { ...process.env, PORT: '0', WHITEBOARD_NO_CANVAS: '1', WHITEBOARD_BOARD: boardPath, ...extraEnv },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  const child = startServer(SB, SB.board(board), extraEnv);
   child._board = board;
-  child._port = new Promise((resolve, reject) => {
-    let buf = '';
-    const onData = (d) => {
-      buf += d.toString();
-      const m = buf.match(/WHITEBOARD_PORT=(\d+)/);
-      if (m) { child.stdout.off('data', onData); resolve(Number(m[1])); }
-    };
-    child.stdout.on('data', onData);
-    child.stderr.on('data', (d) => { if (/Error|error:/.test(d.toString())) buf += d.toString(); });
-    child.on('exit', (code) => reject(new Error(`server ${board} exited early (code ${code})\n${buf}`)));
-    setTimeout(() => reject(new Error(`server ${board} never printed a port\n${buf}`)), 20000);
-  });
+  // SIGTERM/SIGKILL reach the whole server (tsx and the node it forks), never just the launcher.
+  child.kill = (signal = 'SIGTERM') => { void stopServer(child, signal); return true; };
   return child;
 }
 
@@ -138,8 +109,9 @@ async function superviseOrNull(port, sid, ms = 2500) {
 }
 
 function cleanupFiles() {
-  for (const b of boards) for (const ext of ['tldr', 'messages.jsonl', 'lock', 'png']) {
-    fs.rmSync(path.join(HOME, `${b}.${ext}`), { force: true });
+  for (const b of boards) {
+    fs.rmSync(SB.board(b), { force: true });
+    for (const f of Object.values(FILES[b])) fs.rmSync(f, { force: true });
   }
 }
 
@@ -160,11 +132,13 @@ async function main() {
   // `kill -0 <lock.pid>` attach-vs-boot liveness check reads back — not the launcher pid.
   const isAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
   for (const [b, port] of [[A, portA], [B, portB]]) {
-    const lockPath = path.join(HOME, `${b}.lock`);
+    const lockPath = FILES[b].lock;
     ok(fs.existsSync(lockPath), `lockfile ${b}.lock written`);
     const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
     eq(lock.port, port, `${b}.lock port matches the bound port`);
-    eq(lock.board, b, `${b}.lock board is the basename`);
+    eq(lock.board, ROOM[b], `${b}.lock board is the room id derived from the board's path`);
+    eq(lock.path, SB.board(b), `${b}.lock path is the board's canonical path`);
+    eq(lock.name, b, `${b}.lock name is the board's display name`);
     ok(Number.isInteger(lock.pid) && isAlive(lock.pid), `${b}.lock pid is a live process (the attach liveness key)`);
     ok(typeof lock.startedAt === 'number' || typeof lock.startedAt === 'string', `${b}.lock has startedAt`);
   }
@@ -174,7 +148,7 @@ async function main() {
   ok(r1.ok === true, 'POST /message accepted');
   eq(r1.id, 'k1', 'stored message id == idempotencyKey');
 
-  let msgs = (await j(portA, `/messages?room=${A}`)).messages;
+  let msgs = (await j(portA, `/messages?room=${ROOM[A]}`)).messages;
   eq(msgs.length, 1, 'GET /messages returns the one human message');
   eq(msgs[0].author.kind, 'human', 'human message attributed to a human author');
   eq(msgs[0].text, 'hello A', 'human message text round-trips');
@@ -183,7 +157,7 @@ async function main() {
 
   const dup = await post(portA, '/message', { text: 'hello A again', idempotencyKey: 'k1' });
   ok(dup.deduped === true, 'repeat idempotencyKey is deduped');
-  msgs = (await j(portA, `/messages?room=${A}`)).messages;
+  msgs = (await j(portA, `/messages?room=${ROOM[A]}`)).messages;
   eq(msgs.length, 1, 'duplicate did not double-store');
 
   console.log('\n[messages] agent utterance attribution');
@@ -192,7 +166,7 @@ async function main() {
   await sleep(5); // ensure a distinct ts from the human message
   const am = await post(portA, '/agent-message', { text: 'drew a box', sessionId: reg.sessionId, idempotencyKey: 'k2' });
   ok(am.ok === true, 'POST /agent-message accepted');
-  msgs = (await j(portA, `/messages?room=${A}`)).messages;
+  msgs = (await j(portA, `/messages?room=${ROOM[A]}`)).messages;
   eq(msgs.length, 2, 'agent message stored alongside the human one');
   const agent = msgs.find((m) => m.id === 'k2');
   ok(!!agent, 'agent message present by id');
@@ -200,19 +174,19 @@ async function main() {
   eq(agent.author.name, 'Claude', 'agent author name from the registered session');
 
   console.log('\n[messages] since= filter + reload persistence');
-  const since = (await j(portA, `/messages?room=${A}&since=${firstTs}`)).messages;
+  const since = (await j(portA, `/messages?room=${ROOM[A]}&since=${firstTs}`)).messages;
   eq(since.length, 1, 'since= returns only messages after the cursor');
   eq(since[0].id, 'k2', 'since= returned the later (agent) message');
 
-  const sidecar = path.join(HOME, `${A}.messages.jsonl`);
+  const sidecar = FILES[A].messages;
   ok(fs.existsSync(sidecar), 'JSONL sidecar written');
   const lines = fs.readFileSync(sidecar, 'utf8').trim().split('\n').filter(Boolean);
   eq(lines.length, 2, 'sidecar holds both messages (survives a reload)');
 
   console.log('\n[isolation] board B is independent');
-  const bMsgs = (await j(portB, `/messages?room=${B}`)).messages;
+  const bMsgs = (await j(portB, `/messages?room=${ROOM[B]}`)).messages;
   eq(bMsgs.length, 0, 'board B has no messages despite board A traffic');
-  ok(!fs.existsSync(path.join(HOME, `${B}.messages.jsonl`)), 'no sidecar created for the untouched board B');
+  ok(!fs.existsSync(FILES[B].messages), 'no sidecar created for the untouched board B');
 
   // ---- [v5] durable queue: pending Sends survive a restart and drain in order ----
   console.log('\n[v5 durable] pending Sends survive a restart and drain oldest-first');
@@ -222,12 +196,12 @@ async function main() {
   await sleep(8); // guarantee c1.ts < c2.ts
   await post(portC1, '/message', { text: 'second', idempotencyKey: 'c2' });
   // no waiter is parked — both Sends sit durably in the message log as pending
-  let cMsgs = (await j(portC1, `/messages?room=${C}`)).messages;
+  let cMsgs = (await j(portC1, `/messages?room=${ROOM[C]}`)).messages;
   eq(cMsgs.length, 2, 'both Sends stored while no agent was parked');
   ok(cMsgs.every((m) => m.completedAt == null), 'neither Send is completed yet');
   srvC1.kill('SIGTERM');
   await sleep(1300);
-  ok(!fs.existsSync(path.join(HOME, `${C}.lock`)), 'board C lock removed on shutdown');
+  ok(!fs.existsSync(FILES[C].lock), 'board C lock removed on shutdown');
 
   const srvC2 = boot(C); // fresh process, same board file
   const portC2 = await srvC2._port;
@@ -237,7 +211,7 @@ async function main() {
   ok(d2 && d2.id === 'c2', 'the second pending Send drains next, in order');
   const d3 = await nextOrNull(portC2, 1500);
   eq(d3, null, 'nothing more pending once the backlog is drained');
-  cMsgs = (await j(portC2, `/messages?room=${C}`)).messages;
+  cMsgs = (await j(portC2, `/messages?room=${ROOM[C]}`)).messages;
   ok(cMsgs.find((m) => m.id === 'c1').deliveredAt != null, 'a drained Send is marked deliveredAt');
   ok(cMsgs.every((m) => m.completedAt == null), 'delivery is not completion — both still uncompleted');
   srvC2.kill('SIGTERM');
@@ -253,7 +227,7 @@ async function main() {
   ok(ackC1.ok === true, 'POST /instruction-complete acks the turn');
   const ackC1Again = await post(portC3, '/instruction-complete', { id: 'c1' });
   ok(ackC1Again.alreadyComplete === true, 'repeat /instruction-complete is idempotent');
-  cMsgs = (await j(portC3, `/messages?room=${C}`)).messages;
+  cMsgs = (await j(portC3, `/messages?room=${ROOM[C]}`)).messages;
   ok(cMsgs.find((m) => m.id === 'c1').completedAt != null, 'a completed Send carries completedAt');
   const rd2 = await nextOrNull(portC3, 3000);
   ok(rd2 && rd2.id === 'c2', 'only the still-uncompleted Send remains pending');
@@ -289,7 +263,7 @@ async function main() {
   const srvE = boot(E, { WHITEBOARD_STALL_MS: '400', WHITEBOARD_SWEEP_MS: '150', WHITEBOARD_LEAD_GRACE_MS: '500' });
   const portE = await srvE._port;
   const stateOf = async (id) => {
-    const list = (await j(portE, `/messages?room=${E}`)).messages;
+    const list = (await j(portE, `/messages?room=${ROOM[E]}`)).messages;
     return (list.find((x) => x.id === id) || {}).state;
   };
   await post(portE, '/message', { text: 'recover me', idempotencyKey: 'e1' });
@@ -369,7 +343,7 @@ async function main() {
   const h1 = await nextForOrNull(portH, 'worker-3', 'w3', 2500);
   ok(h1 && h1.id === 'h1', 'the revived worker drains the Send that waited for it (nothing lost)');
   await post(portH, '/instruction-complete', { id: 'h1', for: 'worker-3' });
-  const hDone = ((await j(portH, `/messages?room=${H}`)).messages.find((x) => x.id === 'h1') || {}).state;
+  const hDone = ((await j(portH, `/messages?room=${ROOM[H]}`)).messages.find((x) => x.id === 'h1') || {}).state;
   eq(hDone, 'done', 'the revived-and-completed Send is done');
   srvH.kill('SIGTERM'); await sleep(1300);
 
@@ -377,7 +351,7 @@ async function main() {
   console.log('\n[v6 lease] a worker-only crash reclaims its Send on its own queue, not the lead\'s');
   const srvI = boot(I, { WHITEBOARD_STALL_MS: '400', WHITEBOARD_SWEEP_MS: '150' });
   const portI = await srvI._port;
-  const stateOfI = async (id) => ((await j(portI, `/messages?room=${I}`)).messages.find((x) => x.id === id) || {}).state;
+  const stateOfI = async (id) => ((await j(portI, `/messages?room=${ROOM[I]}`)).messages.find((x) => x.id === id) || {}).state;
   await post(portI, '/session/register', { name: 'Claude-4', clientKey: 'worker-4' }); // [v7 #43] known recipient
   await post(portI, '/message', { text: 'lease w4', idempotencyKey: 'i1', recipient: { kind: 'worker', id: 'worker-4' } });
   const tookI = await nextForOrNull(portI, 'worker-4', 'w4-a', 2500);
@@ -408,10 +382,10 @@ async function main() {
   const jLead = await nextForOrNull(portJ, 'lead', 'lead-sid', 1200);
   eq(jLead, null, 'the broadcast does not go to the lead');
   await post(portJ, '/instruction-complete', { id: 'j1', for: 'worker-1' });
-  const jPartial = ((await j(portJ, `/messages?room=${J}`)).messages.find((x) => x.id === 'j1') || {}).state;
+  const jPartial = ((await j(portJ, `/messages?room=${ROOM[J]}`)).messages.find((x) => x.id === 'j1') || {}).state;
   ok(jPartial !== 'done', 'the broadcast is not done while worker-2 has not completed');
   await post(portJ, '/instruction-complete', { id: 'j1', for: 'worker-2' });
-  const jDone = ((await j(portJ, `/messages?room=${J}`)).messages.find((x) => x.id === 'j1') || {}).state;
+  const jDone = ((await j(portJ, `/messages?room=${ROOM[J]}`)).messages.find((x) => x.id === 'j1') || {}).state;
   eq(jDone, 'done', 'the broadcast reads done only once every recipient completes');
   srvJ.kill('SIGTERM'); await sleep(1300);
 
@@ -481,34 +455,32 @@ async function main() {
   const portM = await srvM._port;
   const portN = await srvN._port;
   await sleep(300); // the port prints just before writeLock() runs in the listen callback — let both locks flush
-  const mLockPath = path.join(HOME, `${M}.lock`);
+  const mLockPath = FILES[M].lock;
   eq(JSON.parse(fs.readFileSync(mLockPath, 'utf8')).port, portM, 'M.lock initially points at M\'s own server');
 
   // srvN opens M (already live on srvM). Attach, do NOT switch in-process.
-  const openLive = await post(portN, '/board/open', { path: path.join(HOME, `${M}.tldr`) });
+  const openLive = await post(portN, '/board/open', { path: SB.board(M) });
   eq(openLive.attach, true, '/board/open reports attach:true when the target board is already live');
   eq(openLive.port, portM, '/board/open hands back the live owner\'s port to attach to');
   eq(JSON.parse(fs.readFileSync(mLockPath, 'utf8')).port, portM, 'M.lock still points at M\'s server (not stolen by N) — the split-brain is prevented');
-  eq((await j(portN, '/canvas-status')).activeRoom, N, 'srvN stayed on its own board N (no in-process steal)');
+  eq((await j(portN, '/canvas-status')).activeRoom, ROOM[N], 'srvN stayed on its own board N (no in-process steal)');
 
   // Control: opening an UNOWNED board switches in-process (attach:false, the common single-server case).
-  const openUnowned = await post(portN, '/board/open', { path: path.join(HOME, `${O}.tldr`) });
+  const openUnowned = await post(portN, '/board/open', { path: SB.board(O) });
   eq(openUnowned.attach, false, '/board/open switches in-process (attach:false) for an unowned board');
-  eq((await j(portN, '/canvas-status')).activeRoom, O, 'srvN switched to the unowned board O in-process');
+  eq((await j(portN, '/canvas-status')).activeRoom, ROOM[O], 'srvN switched to the unowned board O in-process');
 
-  // Stale-lock reclaim: kill M's actual server (its lock.pid — the inner node tsx forks, NOT the
-  // launcher srvM) with SIGKILL. SIGKILL is uncatchable, so no graceful removeLock runs: M.lock
+  // Stale-lock reclaim: kill M's server (tsx and the node it forks, whose pid the lock records)
+  // with SIGKILL. SIGKILL is uncatchable, so no graceful removeLock runs: M.lock
   // stays on disk pointing at a now-dead process. Opening M must reclaim it in-process
   // (attach:false), distinguishing a stale lock from a live owner (the guard confirms liveness via
   // the /canvas-status probe, which a dead server fails, so a lingering zombie pid can't fool it).
-  const mLock = JSON.parse(fs.readFileSync(mLockPath, 'utf8'));
-  try { process.kill(mLock.pid, 'SIGKILL'); } catch { /* already gone */ }
-  try { srvM.kill('SIGKILL'); } catch { /* drop the orphaned tsx launcher too */ }
-  await sleep(800);
+  await stopServer(srvM, 'SIGKILL'); // the whole group: tsx and the node whose pid the lock records
+  await sleep(300);
   ok(fs.existsSync(mLockPath), 'the killed server left a stale M.lock behind (no graceful cleanup)');
-  const openStale = await post(portN, '/board/open', { path: path.join(HOME, `${M}.tldr`) });
+  const openStale = await post(portN, '/board/open', { path: SB.board(M) });
   eq(openStale.attach, false, '/board/open reclaims a stale-locked (dead-pid) board in-process, not attach');
-  eq((await j(portN, '/canvas-status')).activeRoom, M, 'srvN took over M after its owner died (stale lock reclaimed)');
+  eq((await j(portN, '/canvas-status')).activeRoom, ROOM[M], 'srvN took over M after its owner died (stale lock reclaimed)');
   srvN.kill('SIGTERM'); await sleep(1300);
 
   // ---- [v9.2] concurrent in-flight leases: a same-session re-poll is served the NEXT Send ----
@@ -519,7 +491,7 @@ async function main() {
   console.log('\n[v9.2 concurrent-leases] a same-session re-poll is served the NEXT Send while its first is still leased');
   const srvP = boot(P);
   const portP = await srvP._port;
-  const stateOfP = async (id) => ((await j(portP, `/messages?room=${P}`)).messages.find((x) => x.id === id) || {}).state;
+  const stateOfP = async (id) => ((await j(portP, `/messages?room=${ROOM[P]}`)).messages.find((x) => x.id === id) || {}).state;
   await post(portP, '/message', { text: 'm1', idempotencyKey: 'p1' });
   await sleep(8); // guarantee p1.ts < p2.ts so ordering is deterministic
   await post(portP, '/message', { text: 'm2', idempotencyKey: 'p2' });
@@ -550,7 +522,7 @@ async function main() {
   console.log('\n[v9.3 never-stop] a parked waiter spares the lead receipt; a confirmed-dead waiterless holder re-queues (never stalled)');
   const srvQ = boot(Q, { WHITEBOARD_STALL_MS: '400', WHITEBOARD_SWEEP_MS: '150', WHITEBOARD_LEAD_GRACE_MS: '500' });
   const portQ = await srvQ._port;
-  const stateOfQ = async (id) => ((await j(portQ, `/messages?room=${Q}`)).messages.find((x) => x.id === id) || {}).state;
+  const stateOfQ = async (id) => ((await j(portQ, `/messages?room=${ROOM[Q]}`)).messages.find((x) => x.id === id) || {}).state;
 
   // leg (2): hold receipt q1 for session lead-P, then park a REAL supervise waiter for lead on the same session.
   await post(portQ, '/message', { text: 'pause me', idempotencyKey: 'q1' });
@@ -609,7 +581,7 @@ async function main() {
   console.log('\n[v9.3 lead-liveness] a live lead is never stalled through the wake→re-arm gap; a confirmed-dead lead re-queues to a new sid');
   const srvR = boot(R, { WHITEBOARD_STALL_MS: '400', WHITEBOARD_SWEEP_MS: '150', WHITEBOARD_LEAD_GRACE_MS: '1500' });
   const portR = await srvR._port;
-  const stateOfR = async (id) => ((await j(portR, `/messages?room=${R}`)).messages.find((x) => x.id === id) || {}).state;
+  const stateOfR = async (id) => ((await j(portR, `/messages?room=${ROOM[R]}`)).messages.find((x) => x.id === id) || {}).state;
   const leadAliveR = async () => (await j(portR, '/canvas-status')).leadAlive;
 
   // A supervise poller that resolves (and would EXIT, like poll.sh) on a 200. It does NOT re-arm on
@@ -672,17 +644,15 @@ async function main() {
   srvA.kill('SIGTERM');
   srvB.kill('SIGTERM');
   await sleep(1200);
-  ok(!fs.existsSync(path.join(HOME, `${A}.lock`)), 'board A lockfile removed on SIGTERM');
-  ok(!fs.existsSync(path.join(HOME, `${B}.lock`)), 'board B lockfile removed on SIGTERM');
+  ok(!fs.existsSync(FILES[A].lock), 'board A lockfile removed on SIGTERM');
+  ok(!fs.existsSync(FILES[B].lock), 'board B lockfile removed on SIGTERM');
 
-  // hard-stop any stragglers, then clean scratch
-  for (const s of [srvA, srvB]) { try { s.kill('SIGKILL'); } catch {} }
-  await sleep(200);
   cleanupFiles();
 
   console.log(`\n${failures.length ? 'FAIL' : 'PASS'} — ${passed} checks passed, ${failures.length} failed`);
-  if (failures.length) { for (const f of failures) console.log(`  - ${f}`); process.exit(1); }
-  process.exit(0);
+  if (failures.length) { for (const f of failures) console.log(`  - ${f}`); process.exitCode = 1; }
 }
 
-main().catch((e) => { console.error('\nERROR', e); process.exit(1); });
+main()
+  .catch((e) => { console.error('\nERROR', e); process.exitCode = 1; })
+  .finally(async () => { await stopAllServers(); process.exit(process.exitCode ?? 0); });

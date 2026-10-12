@@ -11,14 +11,15 @@ and per-object authorship on the live canvas.
 
 Run this after all four v9.1 lanes are integrated and the app is rebuilt
 (`npm --prefix .claude/skills/whiteboard/app run build`). Times are Donostia local.
-`<port>` is the port the server prints on boot; `<board>` is its name.
+`<port>` is the board's port and `<room>` its room id, both from
+`whiteboard.sh locate --board <file>`; `<board>` is its name.
 
 ## 0. Clean start
 
 1. Boot one board on the branch via the skill (SPEC §9). The boot launches the
    render-canvas, opens the operator browser, registers the lead, drains any backlog,
    and starts the background poller.
-2. Sanity: `GET /canvas-status` returns `activeRoom:"<board>"`, `agents:[{id:"lead",…}]`,
+2. Sanity: `GET /canvas-status` returns `activeRoom:"<room>"`, `agents:[{id:"lead",…}]`,
    and `agentParked:true`. The `agentParked:true` with an empty terminal is the whole
    point of v9.1: a waiter is parked in the background job while the foreground turn has
    already ended.
@@ -68,7 +69,7 @@ This is the load-bearing mechanism. SPEC §12 lane 4 says prove it first.
    exhaustion, or `maxTurns`. (To force it deliberately, run the session long/hot enough to
    trip autocompaction.)
 2. **Expect:** the board's **Node process stays up** — its port still answers
-   `GET /canvas-status`, and `<board>.lock` is still on disk pointing at the live pid. The
+   `GET /canvas-status`, and `<room>.lock` is still in the boards folder pointing at the live pid. The
    forced end tore down the *session*, not the *board*.
 3. Send an instruction while no lead session is attached. **Expect:** `agentParked:false`
    (the session ended, not merely mid-conversation), the panel shows the Send **queued** with
@@ -87,7 +88,7 @@ This is the load-bearing mechanism. SPEC §12 lane 4 says prove it first.
    lead finishes any in-flight turn, posts a brief closing `/agent-message`, and performs the
    graceful `POST /done`. This is the **only** agent-side teardown, and it fires **only** on
    this explicit operator signal — never at the lead's discretion.
-4. **Expect (after):** the process exits, `<board>.lock` is removed, and the port stops
+4. **Expect (after):** the process exits, `<room>.lock` is removed, and the port stops
    answering. Confirm the natural-language fallback too: on a fresh board, a plain
    "you can disconnect now" Send drives the same graceful close.
 

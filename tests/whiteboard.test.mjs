@@ -1,7 +1,8 @@
 // Runs the whiteboard skill's suites under `node --test tests/`. They live in tests/whiteboard/ so
 // they never ship inside the skill. The poller test needs only node and curl; the server suites
-// boot the real bridge, so they skip until the skill's runtime is installed
-// (`bash skills/_incubating/whiteboard/scripts/whiteboard.sh install`), which CI does not do.
+// boot the real bridge headless, so they need only the server's dependencies
+// (`npm ci --prefix skills/_incubating/whiteboard/server`, which CI runs) and skip without them.
+// Each suite works in its own temp repository and stops every server it starts (harness.mjs).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -13,7 +14,7 @@ import { fileURLToPath } from "node:url";
 const here = join(dirname(fileURLToPath(import.meta.url)), "whiteboard");
 const skill = join(here, "..", "..", "skills", "_incubating", "whiteboard");
 const tsx = join(skill, "server", "node_modules", ".bin", "tsx");
-const notInstalled = !existsSync(tsx) && "the whiteboard runtime is not installed (whiteboard.sh install)";
+const notInstalled = !existsSync(tsx) && "the whiteboard server's dependencies are not installed (npm ci --prefix skills/_incubating/whiteboard/server)";
 
 test("whiteboard poller", () => {
   const run = spawnSync("bash", [join(here, "poll.test.sh")], { encoding: "utf8" });
