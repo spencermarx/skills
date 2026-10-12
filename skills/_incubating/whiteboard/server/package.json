@@ -1,0 +1,31 @@
+{
+  "name": "whiteboard-bridge",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "bin": {
+    "whiteboard-bridge": "index.ts"
+  },
+  "scripts": {
+    "start": "tsx index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node integration.test.mjs && node sync-corruption.test.mjs",
+    "test:sync-corruption": "node sync-corruption.test.mjs"
+  },
+  "dependencies": {
+    "@tldraw/state": "^5.4.2",
+    "@tldraw/store": "^5.4.2",
+    "@tldraw/sync-core": "^5.4.2",
+    "@tldraw/tlschema": "^5.4.2",
+    "express": "^4.21.2",
+    "playwright": "^1.63.0",
+    "tsx": "^4.23.15",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.25",
+    "@types/node": "^26.6.2",
+    "@types/ws": "^8.18.1",
+    "typescript": "^7.0.2"
+  }
+}
