@@ -205,7 +205,7 @@ async function clientBoundary() {
   foreign403.close();
 
   console.log('\n[1] no response may be framed');
-  for (const [label, p] of [['the app at /', '/'], ['an API response', '/canvas-status'], ['a refused request', '/next-instruction']]) {
+  for (const [label, p] of [['the app at /', '/'], ['an API response', '/canvas-status'], ['a refused request', '/next-instruction'], ['a miss', '/no-such-path']]) {
     const headers = p === '/next-instruction' ? { 'Sec-Fetch-Site': 'cross-site' } : {};
     const r = await request(port, { path: p, headers });
     ok(r.headers['x-frame-options'] === 'DENY' && r.headers['content-security-policy'] === "frame-ancestors 'none'",

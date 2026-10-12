@@ -3096,6 +3096,15 @@ app.post('/done', requireJson, (_req: Request, res: Response) => {
   void shutdown(0);
 });
 
+// Express's own final handler removes every header before it answers a miss or an error, which
+// would drop the framing headers set above. These two answer both instead, so they keep them.
+app.use((_req: Request, res: Response) => {
+  res.status(404).json({ error: 'not found' });
+});
+app.use((err: Error & { status?: number }, _req: Request, res: Response, _next: () => void) => {
+  res.status(err.status ?? 500).json({ error: err.message });
+});
+
 process.on('SIGINT', () => void shutdown(0));
 process.on('SIGTERM', () => void shutdown(0));
 process.on('SIGHUP', () => void shutdown(0));
