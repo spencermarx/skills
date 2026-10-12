@@ -17,7 +17,7 @@ tools they depend on installed:
 - **Triage labels:** the label string for each triage role, when `triage` is installed.
 - **Domain docs:** the glossary file and layout, and where decision records go.
 - **Workspace:** the scratch folder, an optional conventions folder, eval cases, code review.
-- **Tools:** the `ocr` CLI, its per-repository init and its two-reviewer default team, plus `gh`/`glab` where the tracker needs them.
+- **Tools:** the `ocr` CLI and its per-repository init, plus `gh`/`glab` where the tracker needs them; then, as its own question, OCR's two-reviewer default team.
 
 Paths below are relative to this skill's directory; resolve them to absolute
 paths before running anything. Commands that inspect the repository run from the
@@ -92,32 +92,51 @@ monorepo signals.
 - Conventions folder: none, unless one exists (`docs/standards/`,
   `docs/engineering/standards/`, `CONVENTIONS.md`).
 - Brand kit: none, unless a brand folder exists (`docs/brand/`, `brand/`), only
-  when `get-brand-kit` is installed.
+  when `get-brand-kit`, `brand-review`, `create-html-slides` or `design-expert`
+  is installed.
 - Eval cases `.evals/cases/`, only when `harness-eval` is installed.
 - Checks before commit: the command `AGENTS.md`, the contributing guide or CI
   already runs (`npm test`, `make check`, …), if exactly one is evident.
 - Code review: Open Code Review, only when `ocr-review-loop` is installed.
 
-**Section E: Tools.** From the doctor output, list each `missing` or `outdated`
-tool that an installed skill needs, with the reason and the exact install
-command. Ask once which to install. Then, for each the user agreed to:
+**Section E: Tools.** Each line of the doctor output starts with a status:
+`ok`; `missing`; `outdated` (older than a skill needs); `absent` (only needed for
+an option this repository may not use); and, for `ocr-team` only, `default`
+(OCR's own stock team) or `custom` (a team the repository chose: other personas
+or counts, a pinned model, a custom name, or its own comment).
+
+List each `missing` or `outdated` tool that an installed skill needs, with the
+reason and the exact install command. Ask once which to install. Then, for each
+the user agreed to:
 
 - `ocr`: run `scripts/doctor.sh install ocr`.
 - OCR in this repository (`ocr-init` missing): ask which agent tools to
   configure, recommending the one you are running in plus any whose config
   folder exists (`.claude/`, `.codex/`, `.cursor/`, `.gemini/`, `.github/`,
   `.opencode/`, `.windsurf/`). Run `scripts/doctor.sh init-ocr <ids>` with the
-  comma-separated ids the doctor output lists. Then set the review team, below.
-- OCR's review team (`ocr-team` outdated): run `scripts/doctor.sh set-ocr-team`.
-  It sets `default_team` in `.ocr/config.yaml` to one principal and one
-  architect, with a comment that caps the review at two reviewers: a better-fitting
-  lens is swapped in, never added. After an init the user agreed to, run it
-  without asking again: a fresh `.ocr/config.yaml` always holds OCR's stock team.
-- OCR's review team (`ocr-team` custom): the repository already chose its own
-  team. Ask whether to replace it with principal plus architect; recommend
-  keeping it. Only on a yes, run `scripts/doctor.sh set-ocr-team --force`.
+  comma-separated ids the doctor output lists. The new `.ocr/config.yaml` holds
+  OCR's stock team, so re-run `scripts/doctor.sh` and take the review team below.
 - `gh`, `glab`, Node.js: show the install line; the user runs it. `gh auth login`
   is always the user's to run.
+
+**The review team** is a separate question, because it changes how this
+repository is reviewed rather than upgrading a tool. Agreeing to install or
+initialise OCR does not answer it. Ask it once, after the installs, from the
+`ocr-team` line of the latest doctor output:
+
+- `ocr-team` default: OCR's stock team, which every `ocr init` writes. Ask
+  whether to cap reviews at two reviewers, one principal and one architect, where
+  a better-fitting lens is swapped in, never added. Tell the user what the cap
+  overrides, in this sentence: "The cap overrides OCR's auto-added security and
+  testing reviewers: a review gets two reviewers even on auth, API, data or
+  logic-heavy changes." Recommend the cap. Only on a yes, run
+  `scripts/doctor.sh set-ocr-team`. It sets `default_team` in
+  `.ocr/config.yaml` to one principal and one architect, with a comment stating
+  the cap.
+- `ocr-team` custom: the repository already chose its own team. Ask whether to
+  replace it with the capped principal plus architect, with the same sentence;
+  recommend keeping it. Only on a yes, run `scripts/doctor.sh set-ocr-team --force`.
+- `ocr-team` ok: the cap is already set; ask nothing.
 
 If an install fails, print the command for the user to run and carry on with
 the rest. Re-run `scripts/doctor.sh` at the end and show the result.
