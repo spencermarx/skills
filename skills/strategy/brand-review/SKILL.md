@@ -49,25 +49,30 @@ This repository's agent configuration should have been provided to you (the
 `## Agent skills` block pointing at `docs/agents/`); if it is missing, suggest
 the user run the `setup-aclarify-skills` skill. In order:
 
-- **The `Brand kit` folder named in `docs/agents/workspace.md`**, through the
-  `get-brand-kit` skill when it is installed, otherwise read directly using the
-  file names `get-brand-kit` documents. When it is installed, load it (through
-  your skill tool, `/get-brand-kit`, or by reading its SKILL.md): it finds the
-  folder, or serves its own kit when none is set. Read the parts covering
-  colour, typography, logos, layout and voice. When it is not installed and a
-  folder is set, read `color-palette.md`, `typography.md`, `logos.md` (logo
-  paths are relative to the folder), `visual-design-system.md` and
-  `voice-and-tone.md` from the folder; a file it lacks is a dimension not yet
-  defined. Use the values exactly. If a file says `Status: placeholder`, tell
-  the user that brand consistency was checked against a placeholder, not their
-  brand.
-- **Otherwise, a brand guide the user names**, or one in the conventions folder
-  named in `docs/agents/workspace.md` (default: none).
-- **With neither,** ask the user for the brand guide or its core values: palette,
-  typefaces, logo rules. Ask the user, using your structured-question tool if
-  you have one; otherwise list the questions numbered in plain text and stop
-  until they reply. If they would rather you proceed, score the other six
-  dimensions and mark Brand Consistency **not checked: no brand source**.
+1. **The `Brand kit` folder named in `docs/agents/workspace.md`, when one is
+   set.** With the setting at `none`, the default, skip this step. When the
+   `get-brand-kit` skill is installed, load it (through your skill tool,
+   `/get-brand-kit`, or by reading its SKILL.md) and it reads the folder;
+   otherwise read the folder directly, using the file names `get-brand-kit`
+   documents. Read the parts covering colour, typography, logos, layout and
+   voice: `color-palette.md`, `typography.md`, `logos.md` (logo paths are
+   relative to the folder), `visual-design-system.md` and `voice-and-tone.md`;
+   a file the folder lacks is a dimension not yet defined. Use the values
+   exactly.
+2. **Otherwise, a brand guide the user names**, or one in the conventions folder
+   named in `docs/agents/workspace.md` (default: none).
+3. **Otherwise, `get-brand-kit`'s placeholder kit**, when that skill is
+   installed: load it as above and, with no folder set, it serves its own kit.
+   It is the last source before asking, and never outranks a brand guide the
+   user names.
+4. **With none of these,** ask the user for the brand guide or its core values:
+   palette, typefaces, logo rules. Ask the user, using your structured-question
+   tool if you have one; otherwise list the questions numbered in plain text
+   and stop until they reply. If they would rather you proceed, score the other
+   six dimensions and mark Brand Consistency **not checked: no brand source**.
+
+If a brand file you read says `Status: placeholder`, tell the user that brand
+consistency was checked against a placeholder, not their brand.
 
 ## Step 1: identify the asset
 

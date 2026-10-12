@@ -49,27 +49,32 @@ have been provided to you (the `## Agent skills` block pointing at
 `docs/agents/`); if it is missing, suggest the user run the
 `setup-aclarify-skills` skill. In order:
 
-1. **The `Brand kit` folder named in `docs/agents/workspace.md`**, through the
-   `get-brand-kit` skill when it is installed, otherwise read directly using the
-   file names `get-brand-kit` documents. When it is installed, load it (through
-   your skill tool, `/get-brand-kit`, or by reading its SKILL.md): it finds the
-   folder, or serves its own kit when none is set. Read the parts covering
-   color, typography and the visual system. When it is not installed and a
-   folder is set, read `color-palette.md`, `typography.md` and
-   `visual-design-system.md` from the folder. Use the values exactly. If a file
-   says `Status: placeholder`, tell the user the design was checked against a
-   placeholder, not their brand.
+1. **The `Brand kit` folder named in `docs/agents/workspace.md`, when one is
+   set.** With the setting at `none`, the default, skip this step. When the
+   `get-brand-kit` skill is installed, load it (through your skill tool,
+   `/get-brand-kit`, or by reading its SKILL.md) and it reads the folder;
+   otherwise read the folder directly, using the file names `get-brand-kit`
+   documents. Read the parts covering color, typography and the visual system:
+   `color-palette.md`, `typography.md` and `visual-design-system.md`. Use the
+   values exactly.
 2. **Otherwise, the repository's own design system**: its component library,
    theme and design tokens (CSS custom properties, a Tailwind config, a tokens
    file), found from the target's imports and the project's styling setup.
-3. **With neither**, ask the user for the palette, typefaces and any component
-   library they want used, the same way as above. If they would rather you
-   proceed, define a small neutral token set once at the top of the styles, and
-   say in the summary that brand alignment was not checked.
+3. **Otherwise, `get-brand-kit`'s placeholder kit**, when that skill is
+   installed: load it as above and, with no folder set, it serves its own kit.
+   It is the last source before asking, and never outranks the repository's own
+   tokens.
+4. **With none of these**, ask the user for the palette, typefaces and any
+   component library they want used, the same way as above. If they would
+   rather you proceed, define a small neutral token set once at the top of the
+   styles, and say in the summary that brand alignment was not checked.
 
-Either way, build with the components and tokens the code already has. Where the
-brand kit and the code's tokens disagree, say so and ask which wins rather than
-silently overriding either.
+If a brand file you read says `Status: placeholder`, tell the user the design
+was checked against a placeholder, not their brand.
+
+Either way, build with the components and tokens the code already has. Where a
+configured brand kit and the code's tokens disagree, say so and ask which wins
+rather than silently overriding either.
 
 ## Procedure
 
