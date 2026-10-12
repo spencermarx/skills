@@ -17,7 +17,7 @@ tools they depend on installed:
 - **Triage labels:** the label string for each triage role, when `triage` is installed.
 - **Domain docs:** the glossary file and layout, and where decision records go.
 - **Workspace:** the scratch folder, an optional conventions folder, eval cases, code review.
-- **Tools:** the `ocr` CLI and its per-repository init, plus `gh`/`glab` where the tracker needs them.
+- **Tools:** the `ocr` CLI, its per-repository init and its two-reviewer default team, plus `gh`/`glab` where the tracker needs them.
 
 Paths below are relative to this skill's directory; resolve them to absolute
 paths before running anything. Commands that inspect the repository run from the
@@ -105,7 +105,15 @@ command. Ask once which to install. Then, for each the user agreed to:
   configure, recommending the one you are running in plus any whose config
   folder exists (`.claude/`, `.codex/`, `.cursor/`, `.gemini/`, `.github/`,
   `.opencode/`, `.windsurf/`). Run `scripts/doctor.sh init-ocr <ids>` with the
-  comma-separated ids the doctor output lists.
+  comma-separated ids the doctor output lists. Then set the review team, below.
+- OCR's review team (`ocr-team` outdated): run `scripts/doctor.sh set-ocr-team`.
+  It sets `default_team` in `.ocr/config.yaml` to one principal and one
+  architect, with a comment that caps the review at two reviewers: a better-fitting
+  lens is swapped in, never added. After an init the user agreed to, run it
+  without asking again: a fresh `.ocr/config.yaml` always holds OCR's stock team.
+- OCR's review team (`ocr-team` custom): the repository already chose its own
+  team. Ask whether to replace it with principal plus architect; recommend
+  keeping it. Only on a yes, run `scripts/doctor.sh set-ocr-team --force`.
 - `gh`, `glab`, Node.js: show the install line; the user runs it. `gh auth login`
   is always the user's to run.
 

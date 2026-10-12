@@ -150,7 +150,7 @@ backticks and `$()`.
 ### Review comment (each round)
 
 ```markdown
-**OCR multi-agent review, round {n}** ({team summary, e.g. principal×2, quality×2}, independent parallel reviewers)
+**OCR multi-agent review, round {n}** ({team summary, e.g. principal×1, architect×1}, independent parallel reviewers)
 
 {paste the round's final.md verbatim}
 ```
