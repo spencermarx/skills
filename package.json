@@ -1,6 +1,6 @@
 {
   "name": "aclarify-skills",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Agent skills for real work: planning, engineering, writing, strategy and harness craft. Works in Claude Code, Codex, Copilot, Cursor, OpenCode and any harness that reads SKILL.md.",
   "repository": {
