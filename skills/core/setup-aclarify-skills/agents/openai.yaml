@@ -1,0 +1,5 @@
+interface:
+  display_name: "Setup Aclarify Skills"
+  short_description: "Configure this repo for the Aclarify skills and install their tools"
+policy:
+  allow_implicit_invocation: false

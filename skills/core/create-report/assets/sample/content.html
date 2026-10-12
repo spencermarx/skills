@@ -1,0 +1,849 @@
+<div class="r-page">
+  <header class="r-header">
+    <h1 class="r-header__title">How parcels move through Ardoz Depot</h1>
+    <p class="r-header__subject">
+      The five stations between the dock and the truck, the one that saturates
+      every night, and the three routes considered for relieving it.
+    </p>
+    <ul class="r-header__meta">
+      <li><time datetime="2026-08-17">17 August 2026</time></li>
+      <li>3 sections</li>
+      <li>4 entries</li>
+    </ul>
+    <ul class="r-legend">
+      <li>
+        <span class="r-node" aria-hidden="true"></span> Plain outline: a station
+        on the parcel's path
+      </li>
+      <li>
+        <span class="r-node r-node--strong" aria-hidden="true"></span> Solid
+        box: the part the entry is about
+      </li>
+      <li>
+        <span class="r-edge r-edge--warn" aria-hidden="true"></span> Accented
+        line: a segment running at capacity
+      </li>
+      <li>
+        <span class="r-badge r-badge--accent">carry forward</span> take this
+      </li>
+      <li>
+        <span class="r-badge r-badge--warn">weigh the cost</span> the cost lands
+        elsewhere in the depot
+      </li>
+      <li>
+        <span class="r-badge r-badge--quiet">held</span> recorded, not acted on
+      </li>
+    </ul>
+  </header>
+
+  <nav aria-label="Sections">
+    <ol class="r-toc">
+      <li><a href="#sec-today">How the depot runs today</a></li>
+      <li><a href="#sec-routes">Three routes considered</a></li>
+      <li><a href="#closing">What to take away</a></li>
+    </ol>
+  </nav>
+
+  <main class="r-stack">
+    <section class="r-section" aria-labelledby="sec-today">
+      <h2 class="r-section__head" id="sec-today">How the depot runs today</h2>
+      <p class="r-section__lede">
+        Ardoz Depot moves 84,200 parcels on an average weekday, across three
+        shifts and 24 chutes. Every one of them passes a single induction arch,
+        and for 214 minutes of every night that arch is the whole depot.
+      </p>
+
+      <div class="r-stack">
+        <dl class="r-meta">
+          <dt>Range</dt>
+          <dd>17 July to 15 August 2026, weekdays</dd>
+          <dt>Source</dt>
+          <dd>Depot scan log, dock scan to chute scan</dd>
+          <dt>Record</dt>
+          <dd class="r-mono">record.md</dd>
+        </dl>
+
+        <article class="r-entry" id="entry-spine">
+          <div class="r-entry__head">
+            <h3 class="r-entry__title">The induction spine</h3>
+            <ul class="r-entry__badges">
+              <li><span class="r-badge r-badge--quiet">baseline</span></li>
+              <li><span class="r-tag">night shift</span></li>
+              <li><span class="r-tag">measured</span></li>
+            </ul>
+          </div>
+          <div class="r-entry__body">
+            <div class="r-field">
+              <span class="r-field__label">Rated</span>
+              <span class="r-field__value"
+                >9,400 scans an hour, one arch, no bypass.</span
+              >
+            </div>
+            <div class="r-field">
+              <span class="r-field__label">Peak</span>
+              <span class="r-field__value"
+                >11,300 an hour between 23:00 and 01:00, on four nights in
+                five.</span
+              >
+            </div>
+            <div class="r-field">
+              <span class="r-field__label">Cost</span>
+              <span class="r-field__value"
+                >214 of the night shift's 480 minutes at capacity, with the yard
+                queue building behind it.</span
+              >
+            </div>
+
+            <figure class="r-figure">
+              <div class="r-figure__frame r-scroll-x">
+                <svg
+                  viewBox="0 0 880 260"
+                  style="min-width: 720px"
+                  role="img"
+                  aria-labelledby="spine-title spine-desc"
+                >
+                  <title id="spine-title">
+                    Every parcel passes one induction arch.
+                  </title>
+                  <desc id="spine-desc">
+                    Three unload docks — trunk, local and returns — feed one
+                    yard queue. The queue feeds a single induction arch rated
+                    9,400 scans an hour, which arrivals exceed at 11,300 an hour
+                    in the night peak. The arch feeds the cross-belt sorter, and
+                    the sorter feeds 24 chutes.
+                  </desc>
+                  <defs>
+                    <marker
+                      id="spine-tip"
+                      refX="7"
+                      refY="4"
+                      markerWidth="8"
+                      markerHeight="8"
+                      orient="auto"
+                    >
+                      <path d="M0 0 L8 4 L0 8 z" fill="var(--r-rule-strong)" />
+                    </marker>
+                    <marker
+                      id="spine-tip-warn"
+                      refX="7"
+                      refY="4"
+                      markerWidth="8"
+                      markerHeight="8"
+                      orient="auto"
+                    >
+                      <path d="M0 0 L8 4 L0 8 z" fill="var(--r-warn)" />
+                    </marker>
+                  </defs>
+
+                  <g class="r-edge" marker-end="url(#spine-tip)">
+                    <line x1="152" y1="34" x2="212" y2="100" />
+                    <line x1="152" y1="120" x2="212" y2="120" />
+                    <line x1="152" y1="206" x2="212" y2="140" />
+                    <line x1="560" y1="120" x2="620" y2="120" />
+                    <line x1="752" y1="120" x2="798" y2="83" />
+                    <line x1="752" y1="120" x2="798" y2="120" />
+                    <line x1="752" y1="120" x2="798" y2="157" />
+                  </g>
+                  <line
+                    class="r-edge r-edge--warn"
+                    marker-end="url(#spine-tip-warn)"
+                    x1="346"
+                    y1="120"
+                    x2="412"
+                    y2="120"
+                  />
+
+                  <rect
+                    class="r-node"
+                    x="12"
+                    y="10"
+                    width="140"
+                    height="48"
+                    rx="4"
+                  />
+                  <rect
+                    class="r-node"
+                    x="12"
+                    y="96"
+                    width="140"
+                    height="48"
+                    rx="4"
+                  />
+                  <rect
+                    class="r-node"
+                    x="12"
+                    y="182"
+                    width="140"
+                    height="48"
+                    rx="4"
+                  />
+                  <rect
+                    class="r-node"
+                    x="214"
+                    y="76"
+                    width="132"
+                    height="88"
+                    rx="4"
+                  />
+                  <rect
+                    class="r-node r-node--strong"
+                    x="414"
+                    y="82"
+                    width="146"
+                    height="76"
+                    rx="4"
+                  />
+                  <rect
+                    class="r-node"
+                    x="622"
+                    y="88"
+                    width="130"
+                    height="64"
+                    rx="4"
+                  />
+                  <rect
+                    class="r-node"
+                    x="800"
+                    y="66"
+                    width="56"
+                    height="34"
+                    rx="3"
+                  />
+                  <rect
+                    class="r-node"
+                    x="800"
+                    y="103"
+                    width="56"
+                    height="34"
+                    rx="3"
+                  />
+                  <rect
+                    class="r-node"
+                    x="800"
+                    y="140"
+                    width="56"
+                    height="34"
+                    rx="3"
+                  />
+
+                  <g class="r-label" text-anchor="middle">
+                    <text x="82" y="38">Trunk</text>
+                    <text x="82" y="124">Local</text>
+                    <text x="82" y="210">Returns</text>
+                    <text x="82" y="252">Unload docks</text>
+                    <text x="280" y="116">Yard</text>
+                    <text x="280" y="132">queue</text>
+                    <text x="487" y="182">9,400 scans/h</text>
+                    <text x="687" y="116">Cross-belt</text>
+                    <text x="687" y="132">sorter</text>
+                    <text x="828" y="200">24 chutes</text>
+                    <text x="379" y="62" style="fill: var(--r-warn)">
+                      Peak 11,300/h
+                    </text>
+                  </g>
+                  <g
+                    class="r-label"
+                    text-anchor="middle"
+                    style="fill: var(--r-ink-inverse)"
+                  >
+                    <text x="487" y="116">Induction</text>
+                    <text x="487" y="132">arch</text>
+                  </g>
+                </svg>
+              </div>
+              <figcaption class="r-figure__caption">
+                Figure 1 — the whole depot in one line. Three docks, one queue,
+                one arch, one sorter, 24 chutes. The accented segment is the one
+                that runs at capacity.
+              </figcaption>
+            </figure>
+
+            <ul class="r-points">
+              <li>Every parcel passes the arch</li>
+              <li>Night carries 49% of the day's volume</li>
+              <li>Night dwell runs at twice the day's</li>
+            </ul>
+            <p class="r-callout r-callout--accent">
+              Nothing downstream of the arch has run out of capacity in the 30
+              days measured.
+            </p>
+            <p>
+              <a class="r-trace" href="record.md#the-induction-spine"
+                >Record: the induction spine</a
+              >
+            </p>
+          </div>
+        </article>
+
+        <div
+          class="r-scroll-x"
+          role="region"
+          aria-labelledby="tbl-shifts"
+          tabindex="0"
+        >
+          <table class="r-table">
+            <caption id="tbl-shifts">
+              Table 1 — one weekday at Ardoz, by shift. Rolling 30-day median to
+              15 August 2026.
+            </caption>
+            <thead>
+              <tr>
+                <th scope="col">Shift</th>
+                <th scope="col">Window</th>
+                <th scope="col">Parcels in</th>
+                <th scope="col">Parcels sorted</th>
+                <th scope="col">Carried out</th>
+                <th scope="col">Median dwell</th>
+                <th scope="col">Misroute</th>
+                <th scope="col">Arch at capacity</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row">Night</th>
+                <td>22:00–06:00</td>
+                <td>41,200</td>
+                <td>40,850</td>
+                <td>350</td>
+                <td>148 min</td>
+                <td>1.9%</td>
+                <td>214 of 480 min</td>
+              </tr>
+              <tr>
+                <th scope="row">Day</th>
+                <td>06:00–14:00</td>
+                <td>22,600</td>
+                <td>22,740</td>
+                <td>210</td>
+                <td>71 min</td>
+                <td>1.1%</td>
+                <td>41 of 480 min</td>
+              </tr>
+              <tr>
+                <th scope="row">Twilight</th>
+                <td>14:00–22:00</td>
+                <td>20,400</td>
+                <td>20,610</td>
+                <td>0</td>
+                <td>63 min</td>
+                <td>0.8%</td>
+                <td>0 of 480 min</td>
+              </tr>
+              <tr>
+                <th scope="row">All three</th>
+                <td>24 h</td>
+                <td>84,200</td>
+                <td>84,200</td>
+                <td>0</td>
+                <td>96 min</td>
+                <td>1.4%</td>
+                <td>255 of 1,440 min</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          <a class="r-trace" href="record.md#throughput-by-shift"
+            >Record: throughput by shift</a
+          >
+        </p>
+      </div>
+    </section>
+
+    <section class="r-section" aria-labelledby="sec-routes">
+      <h2 class="r-section__head" id="sec-routes">Three routes considered</h2>
+      <p class="r-section__lede">
+        Each route was replayed against the same 30 days of scan records. One
+        adds capacity at the arch, one takes work away from it, and one returns
+        the time the arch spends on its own mistakes.
+      </p>
+
+      <div class="r-stack">
+        <figure class="r-figure">
+          <div class="r-figure__frame">
+            <div
+              class="r-stack"
+              style="
+                flex-direction: row;
+                align-items: flex-end;
+                gap: var(--r-space-5);
+              "
+            >
+              <div
+                class="r-stack"
+                style="gap: var(--r-space-2); align-items: center"
+              >
+                <span
+                  class="r-node r-node--strong"
+                  style="height: 9rem; width: 5rem"
+                  >148</span
+                >
+                <span class="r-label">Today</span>
+              </div>
+              <div
+                class="r-stack"
+                style="gap: var(--r-space-2); align-items: center"
+              >
+                <span class="r-node" style="height: 4.5rem; width: 5rem"
+                  >74</span
+                >
+                <span class="r-label">Route A</span>
+              </div>
+              <div
+                class="r-stack"
+                style="gap: var(--r-space-2); align-items: center"
+              >
+                <span class="r-node" style="height: 5.8rem; width: 5rem"
+                  >96</span
+                >
+                <span class="r-label">Route B</span>
+              </div>
+              <div
+                class="r-stack"
+                style="gap: var(--r-space-2); align-items: center"
+              >
+                <span class="r-node" style="height: 8.6rem; width: 5rem"
+                  >141</span
+                >
+                <span class="r-label">Route C</span>
+              </div>
+            </div>
+          </div>
+          <figcaption class="r-figure__caption">
+            Figure 2 — median dwell in minutes for a parcel arriving in the
+            23:00 to 01:00 peak, today and under each route. The three routes
+            are not additive: A and B relieve the same station.
+          </figcaption>
+        </figure>
+        <p>
+          <a class="r-trace" href="record.md#peak-hour-dwell-under-each-route"
+            >Record: peak hour dwell under each route</a
+          >
+        </p>
+
+        <article class="r-entry" id="route-a">
+          <div class="r-entry__head">
+            <h3 class="r-entry__title">Route A: a second induction arch</h3>
+            <ul class="r-entry__badges">
+              <li><span class="r-badge r-badge--warn">weigh the cost</span></li>
+              <li><span class="r-tag">capital works</span></li>
+              <li><span class="r-tag">11 months</span></li>
+            </ul>
+          </div>
+          <div class="r-entry__body">
+            <div class="r-field">
+              <span class="r-field__label">Adds</span>
+              <span class="r-field__value"
+                >A second arch against the west wall, fed directly by the trunk
+                dock.</span
+              >
+            </div>
+            <div class="r-field">
+              <span class="r-field__label">Buys</span>
+              <span class="r-field__value"
+                >Peak-hour dwell of 74 minutes, down from 148, and no minute of
+                the night at arch capacity.</span
+              >
+            </div>
+            <div class="r-field">
+              <span class="r-field__label">Costs</span>
+              <span class="r-field__value"
+                >Eleven months and structural work on the west wall.</span
+              >
+            </div>
+
+            <figure class="r-figure">
+              <div class="r-pair">
+                <div class="r-figure__frame">
+                  <p class="r-label">Today</p>
+                  <svg
+                    viewBox="0 0 380 230"
+                    role="img"
+                    aria-labelledby="routea-now-title routea-now-desc"
+                  >
+                    <title id="routea-now-title">
+                      Three docks converge on one arch.
+                    </title>
+                    <desc id="routea-now-desc">
+                      The trunk, local and returns docks all feed a single
+                      induction arch rated 9,400 scans an hour.
+                    </desc>
+                    <defs>
+                      <marker
+                        id="routea-now-tip"
+                        refX="7"
+                        refY="4"
+                        markerWidth="8"
+                        markerHeight="8"
+                        orient="auto"
+                      >
+                        <path
+                          d="M0 0 L8 4 L0 8 z"
+                          fill="var(--r-rule-strong)"
+                        />
+                      </marker>
+                    </defs>
+                    <g class="r-edge" marker-end="url(#routea-now-tip)">
+                      <line x1="112" y1="37" x2="230" y2="105" />
+                      <line x1="112" y1="113" x2="230" y2="113" />
+                      <line x1="112" y1="189" x2="230" y2="121" />
+                    </g>
+                    <rect
+                      class="r-node"
+                      x="8"
+                      y="16"
+                      width="104"
+                      height="42"
+                      rx="4"
+                    />
+                    <rect
+                      class="r-node"
+                      x="8"
+                      y="92"
+                      width="104"
+                      height="42"
+                      rx="4"
+                    />
+                    <rect
+                      class="r-node"
+                      x="8"
+                      y="168"
+                      width="104"
+                      height="42"
+                      rx="4"
+                    />
+                    <rect
+                      class="r-node r-node--strong"
+                      x="232"
+                      y="85"
+                      width="136"
+                      height="56"
+                      rx="4"
+                    />
+                    <g class="r-label" text-anchor="middle">
+                      <text x="60" y="41">Trunk</text>
+                      <text x="60" y="117">Local</text>
+                      <text x="60" y="193">Returns</text>
+                      <text x="300" y="170">9,400/h</text>
+                    </g>
+                    <g
+                      class="r-label"
+                      text-anchor="middle"
+                      style="fill: var(--r-ink-inverse)"
+                    >
+                      <text x="300" y="109">Induction</text>
+                      <text x="300" y="125">arch</text>
+                    </g>
+                  </svg>
+                </div>
+                <div class="r-figure__frame">
+                  <p class="r-label">Route A</p>
+                  <svg
+                    viewBox="0 0 380 230"
+                    role="img"
+                    aria-labelledby="routea-next-title routea-next-desc"
+                  >
+                    <title id="routea-next-title">
+                      The trunk dock gets an arch of its own.
+                    </title>
+                    <desc id="routea-next-desc">
+                      A new west arch takes the trunk dock alone; the existing
+                      east arch keeps the local and returns docks. Combined
+                      rating 18,800 scans an hour.
+                    </desc>
+                    <defs>
+                      <marker
+                        id="routea-next-tip"
+                        refX="7"
+                        refY="4"
+                        markerWidth="8"
+                        markerHeight="8"
+                        orient="auto"
+                      >
+                        <path
+                          d="M0 0 L8 4 L0 8 z"
+                          fill="var(--r-rule-strong)"
+                        />
+                      </marker>
+                    </defs>
+                    <g class="r-edge" marker-end="url(#routea-next-tip)">
+                      <line x1="112" y1="37" x2="230" y2="53" />
+                      <line x1="112" y1="113" x2="230" y2="166" />
+                      <line x1="112" y1="189" x2="230" y2="180" />
+                    </g>
+                    <rect
+                      class="r-node"
+                      x="8"
+                      y="16"
+                      width="104"
+                      height="42"
+                      rx="4"
+                    />
+                    <rect
+                      class="r-node"
+                      x="8"
+                      y="92"
+                      width="104"
+                      height="42"
+                      rx="4"
+                    />
+                    <rect
+                      class="r-node"
+                      x="8"
+                      y="168"
+                      width="104"
+                      height="42"
+                      rx="4"
+                    />
+                    <rect
+                      class="r-node r-node--strong"
+                      x="232"
+                      y="28"
+                      width="136"
+                      height="50"
+                      rx="4"
+                    />
+                    <rect
+                      class="r-node r-node--strong"
+                      x="232"
+                      y="148"
+                      width="136"
+                      height="50"
+                      rx="4"
+                    />
+                    <g class="r-label" text-anchor="middle">
+                      <text x="60" y="41">Trunk</text>
+                      <text x="60" y="117">Local</text>
+                      <text x="60" y="193">Returns</text>
+                      <text x="300" y="216">18,800/h</text>
+                    </g>
+                    <g
+                      class="r-label"
+                      text-anchor="middle"
+                      style="fill: var(--r-ink-inverse)"
+                    >
+                      <text x="300" y="49">West arch</text>
+                      <text x="300" y="65">new</text>
+                      <text x="300" y="169">East arch</text>
+                      <text x="300" y="185">existing</text>
+                    </g>
+                  </svg>
+                </div>
+              </div>
+              <figcaption class="r-figure__caption">
+                Figure 3 — drawn on one scale. The rating doubles to 18,800
+                scans an hour against a peak demand of 11,300, so the queue in
+                front of the arch never forms.
+              </figcaption>
+            </figure>
+
+            <ul class="r-points">
+              <li>Combined rating 18,800 an hour</li>
+              <li>Peak demand 11,300 an hour</li>
+              <li>Bay doors free at 05:10 today</li>
+            </ul>
+            <p class="r-callout r-callout--warn">
+              The bays would need to be free by 04:20, and they carry no scan of
+              their own — so the constraint moves somewhere the depot cannot see
+              it.
+            </p>
+            <p>
+              <a
+                class="r-trace"
+                href="record.md#route-a-a-second-induction-arch"
+                >Record: route A</a
+              >
+            </p>
+          </div>
+        </article>
+
+        <article class="r-entry" id="route-b">
+          <div class="r-entry__head">
+            <h3 class="r-entry__title">Route B: pre-sorted trunk containers</h3>
+            <ul class="r-entry__badges">
+              <li>
+                <span class="r-badge r-badge--accent">carry forward</span>
+              </li>
+              <li><span class="r-tag">process change</span></li>
+              <li><span class="r-tag">6 weeks per depot</span></li>
+            </ul>
+          </div>
+          <div class="r-entry__body">
+            <div class="r-field">
+              <span class="r-field__label">Removes</span>
+              <span class="r-field__value"
+                >15,700 trunk parcels a night from the arch, 38% of night
+                volume.</span
+              >
+            </div>
+            <div class="r-field">
+              <span class="r-field__label">Buys</span>
+              <span class="r-field__value"
+                >Peak-hour arch demand of 7,000 an hour, under the 9,400 rating,
+                and dwell of 96 minutes.</span
+              >
+            </div>
+            <div class="r-field">
+              <span class="r-field__label">Costs</span>
+              <span class="r-field__value"
+                >No capital work. Six weeks per origin depot to change the
+                loading standard.</span
+              >
+            </div>
+            <ul class="r-files">
+              <li>BIL-04</li>
+              <li>VIT-02</li>
+              <li>LOG-01</li>
+              <li>PMP-03</li>
+            </ul>
+
+            <figure class="r-figure">
+              <div class="r-pair">
+                <div class="r-figure__frame">
+                  <div
+                    class="r-stack"
+                    style="gap: var(--r-space-2); width: 100%"
+                  >
+                    <p class="r-label">Trunk parcel today</p>
+                    <span class="r-node">Yard queue</span>
+                    <span class="r-node">Induction arch</span>
+                    <span class="r-node">Cross-belt sorter</span>
+                    <span class="r-node">Chute</span>
+                    <span class="r-node">Outbound bay</span>
+                  </div>
+                </div>
+                <div class="r-figure__frame">
+                  <div
+                    class="r-stack"
+                    style="gap: var(--r-space-2); width: 100%"
+                  >
+                    <p class="r-label">Pre-sorted container</p>
+                    <span
+                      class="r-node r-node--strong"
+                      style="min-height: var(--r-space-7)"
+                      >Chute spur</span
+                    >
+                    <span class="r-node">Outbound bay</span>
+                  </div>
+                </div>
+              </div>
+              <figcaption class="r-figure__caption">
+                Figure 4 — five handlings become two. A correctly loaded
+                container reaches its chute spur without passing either the arch
+                or the sorter.
+              </figcaption>
+            </figure>
+
+            <ul class="r-points">
+              <li>Arch night load 41,200 to 25,500</li>
+              <li>Handlings per trunk parcel 5 to 2</li>
+              <li>Nothing is built</li>
+            </ul>
+            <p class="r-callout r-callout--warn">
+              A container loaded to the wrong chute group is unsortable at the
+              spur: it returns to the arch whole, and costs more arch time than
+              sending it there would have.
+            </p>
+            <p>
+              <a
+                class="r-trace"
+                href="record.md#route-b-pre-sorted-trunk-containers"
+                >Record: route B</a
+              >
+            </p>
+          </div>
+        </article>
+
+        <article class="r-entry" id="route-c">
+          <div class="r-entry__head">
+            <h3 class="r-entry__title">Route C: rebuild the exception loop</h3>
+            <ul class="r-entry__badges">
+              <li><span class="r-badge r-badge--quiet">held</span></li>
+              <li><span class="r-tag">software</span></li>
+              <li><span class="r-tag">one release</span></li>
+            </ul>
+          </div>
+          <div class="r-entry__body">
+            <div class="r-field">
+              <span class="r-field__label">Changes</span>
+              <span class="r-field__value"
+                >A re-labelled parcel rejoins at the chute spur instead of at
+                the head of the arch queue.</span
+              >
+            </div>
+            <div class="r-field">
+              <span class="r-field__label">Buys</span>
+              <span class="r-field__value"
+                >26 minutes of arch time a night, a tenth of its running time,
+                and dwell of 141 minutes.</span
+              >
+            </div>
+            <div class="r-field">
+              <span class="r-field__label">Costs</span>
+              <span class="r-field__value"
+                >One release of the sorter control software. Nothing on the
+                floor moves.</span
+              >
+            </div>
+
+            <figure class="r-figure">
+              <div class="r-figure__frame r-figure__frame--mermaid r-scroll-x">
+                <pre class="mermaid">
+flowchart LR
+  A[Induction arch] --> B{Label reads}
+  B -- yes --> C[Cross-belt sorter]
+  B -- no --> D[Exception desk]
+  D --> E[Re-label]
+  E -. "back to the head of the arch queue" .-> A
+  classDef marked stroke:#b45309,stroke-width:2px;
+  class A marked
+                </pre>
+              </div>
+              <figcaption class="r-figure__caption">
+                Figure 5 — the loop returns a re-labelled parcel to the arch, so
+                each of the 2,900 nightly exceptions costs the arch a second
+                pass.
+              </figcaption>
+            </figure>
+
+            <ul class="r-points">
+              <li>2,900 parcels leave the line nightly</li>
+              <li>1,180 of those need a third pass</li>
+              <li>Seven minutes off the peak</li>
+            </ul>
+            <p>
+              <a
+                class="r-trace"
+                href="record.md#route-c-rebuild-the-exception-loop"
+                >Record: route C</a
+              >
+            </p>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="r-closing" aria-labelledby="closing">
+      <h2 class="r-section__head" id="closing">What to take away</h2>
+      <p>
+        The arch is the depot's only constraint, and Route B is the only route
+        that takes work off it rather than building capacity around it: 15,700
+        parcels a night stop passing it, at no capital cost, and the constraint
+        stays where the depot already measures it.
+      </p>
+      <p>
+        <a class="r-trace" href="#route-b"
+          >Route B: pre-sorted trunk containers</a
+        >
+      </p>
+    </section>
+  </main>
+
+  <footer class="r-footer">
+    <p class="r-small r-muted">
+      Generated from <span class="r-mono">record.md</span> on 17 August 2026.
+      Ardoz Depot, its figures and its three routes are invented; this is the
+      worked sample shipped with the create-report skill.
+    </p>
+  </footer>
+</div>
