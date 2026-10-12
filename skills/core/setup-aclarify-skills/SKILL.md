@@ -91,6 +91,8 @@ monorepo signals.
 - Scratch folder `.scratchpad/` (or the one that exists), added to `.gitignore`.
 - Conventions folder: none, unless one exists (`docs/standards/`,
   `docs/engineering/standards/`, `CONVENTIONS.md`).
+- Brand kit: none, unless a brand folder exists (`docs/brand/`, `brand/`), only
+  when `get-brand-kit` is installed.
 - Eval cases `.evals/cases/`, only when `harness-eval` is installed.
 - Checks before commit: the command `AGENTS.md`, the contributing guide or CI
   already runs (`npm test`, `make check`, …), if exactly one is evident.
