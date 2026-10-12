@@ -955,7 +955,9 @@ decision as the design fans out.
     it does **not** rest on agent discipline alone — **three guarantees stack**: (1) **[v9.2]** relaunch
     is the **unmissable first action on wake**, before the read-act turn (it moved from the end of
     the turn to the front, so a waiter is parked through the whole draw); (2) **boot and attach
-    verify a live poller** (`/canvas-status` `agentParked`) and start one if absent; (3) the
+    verify a live poller** (`/canvas-status?sessionId=<sid>` `youParked`, re-read for up to about
+    5 s after a launch, since a poller takes a moment to park and a duplicate never ends) and start
+    one if absent; (3) the
     **durable-queue floor** makes any missed re-arm **loss-free** — the Send waits, loud, and drains on
     the next poller return or `/whiteboard open`. A **`Stop` hook cannot own the listener**: a
     hook-spawned process does **not** get CC's `run_in_background` wake-on-exit (only the agent's own
@@ -1058,24 +1060,45 @@ side-table, no separate persistence.
 - **[v9.9] The boot path honors it too.** `whiteboard.sh start` and the server's own boot both
   refuse (exit 4) a board whose lock has a live foreign owner, so a second `start` never steals the
   lock. The server also refuses to boot onto a board outside the repository, in a folder that does
-  not exist, or one it cannot load. `whiteboard.sh start` applies the placement rule
-  (`boards.mjs`) before it creates anything, then creates the boards folder and opens the board's
-  log itself, so the first boot in a fresh repository has somewhere to write.
+  not exist, or one it cannot load. The placement rule (`boards.mjs` `placementRefusal`: a
+  `.tldr` inside the repository or the boards folder, in a folder that exists, the boards folder
+  itself excepted) is one rule for `locate`, `start`, the server's boot and `/board/open`, so
+  `whiteboard.sh start` refuses (exit 2) before it creates anything, then creates the boards folder
+  and opens the board's log itself, so the first boot in a fresh repository has somewhere to write.
+- **[v9.9] A detached server has a session of its own.** `whiteboard.sh start --detach` spawns the
+  server through Node (`spawn(…, {detached: true, stdio: 'ignore'}).unref()`, which calls
+  `setsid()`; `setsid(1)` is not on macOS, and `nohup` is inert for Node, which resets signal
+  dispositions). So a TERM or HUP to the caller's process group, which is how a harness reaps a
+  tool call, never reaches it. The server keeps its SIGHUP handler: with no controlling terminal
+  the kernel never sends it one, and a hand-sent HUP is a deliberate, graceful stop.
 - **[v9.9] A board file the server cannot load is refused, never replaced.** Unparseable JSON,
   tldraw.com's own `{tldrawFileFormatVersion, records}` format, or anything `TLSocketRoom` cannot
   construct from is a 4xx on the HTTP routes and a refused `/sync/` upgrade; the room is not cached
-  and so never persisted. Only rooms that changed are written, by temp file and rename.
+  and so never persisted. Only rooms that changed are written, by temp file and rename. Once a
+  board loads, the temp files a crashed write left beside it are removed: only the writer's exact
+  name (`.<board>.<pid>.<seq>.tmp`), and never one whose writer still runs.
+- **[v9.9] A board that cannot be saved is never switched away from.** If the room being left
+  cannot be flushed, the switch is refused (503, said in the panel): that room stays served,
+  joinable and locked, so no edit is lost to the eviction.
 - **[v9.9] Simultaneous launches.** Of two servers started at the same instant on one board,
   exactly one boots: the exclusive claim decides, and the other exits 4. `whiteboard.sh start
-  --detach` then waits for whichever server comes up and prints its lock.
+  --detach` cannot read the detached server's exit code, so when its server ends before the board
+  is live it keeps waiting while the lock names another live server still starting, then prints
+  that server's JSON (exit 0; its `ownerSessionId` tells the caller it is a guest); otherwise it
+  prints the end of the log and exits 1. Every exit 2 and 3 is decided before the spawn.
 - **[v9.9] Only its own clients.** Each request and WebSocket upgrade must name a loopback `Host`
   for this port (DNS rebinding); a `Sec-Fetch-Site` other than `same-origin` or `none` is refused
   (a page on another origin, including another port of 127.0.0.1 or localhost, which browsers
   mark `same-site`), and so is any `Origin` but the server's own. A browser sends no `Origin` on a
   no-cors fetch, an `<img>` or a navigation, so `Sec-Fetch-Site` is what stops a foreign page's GET
-  (`/next-instruction` drains and parks). The app's static files are served after the Host check
-  and before the rest, so a link to a board still loads. Non-browser clients (curl, `poll.sh`,
-  the liveness probe) send neither header; the probe counts a 403 as live, never as stale. The
+  (`/next-instruction` drains and parks). A browser without Fetch Metadata (before Safari 16.4 or
+  Firefox 90) sends neither header and is treated like curl. The app's static files are served
+  after the Host check and before the rest, so a link to a board still loads, and every response
+  carries `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`, so no page
+  can frame the app (a framed copy's requests would be same-origin, and its `/events` socket a
+  phantom human in `/canvas-status`). Non-browser clients (curl, `poll.sh`, the liveness probe)
+  send neither header, so the guard cannot refuse the probe: only a 200 naming the room counts as
+  live, and any other answer, a foreign server's 403 included, reads as stale. The
   render-canvas's `/events` slot (`role=agent`) also needs a per-process key that only the
   server's own Playwright page is given.
 
@@ -1122,7 +1145,8 @@ side-table, no separate persistence.
    parks a waiter continuously and wakes the foreground only on a real Send (§8.5, #48), so the
    foreground stays free to converse with the operator between turns. **[v9.1]** That job runs a
    **skill-owned Bash poller script** (§8.5), and boot/attach **verifies a live poller is parked**
-   (`/canvas-status` `agentParked:true`) before handing the turn back — if none is, it launches one.
+   (`/canvas-status?sessionId=<sid>` `youParked:true`, re-read for up to about 5 s after a launch)
+   before handing the turn back — if none is, it launches one.
    The poller-liveness check is one of the three guarantees that keep the listener alive without
    relying on agent memory (#48 amended).
 

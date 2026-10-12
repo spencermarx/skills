@@ -34,8 +34,8 @@ its own clients: requests must address `127.0.0.1:<port>` or `localhost:<port>`;
 a browser request that says it comes from another site (any `Sec-Fetch-Site`
 but `same-origin` or `none`, which covers a page on another port of the same
 host) or carries another page's `Origin` is refused. Only the app's own files
-load from a link on another site. Your `curl` calls and the poller send neither
-header, so they are unaffected.
+load from a link on another site, and no page may frame them. Your `curl` calls
+and the poller send neither header, so they are unaffected.
 
 Paths below are relative to this skill's directory; resolve them to absolute
 paths before running anything. Run commands from the repository root.
@@ -127,7 +127,8 @@ its files in the boards folder. `live` is the lock's contents,
 `{ port, pid, room, path, name, startedAt, ownerSession?, ownerSessionId? }`,
 when a server holding it is running (its pid is alive and its port answers for
 this room), else `null`. Read every field by name; the shapes grow. Exit 2 means
-the path is not a `.tldr` inside the repository; say so and stop.
+the path is not a `.tldr` inside the repository, or its folder does not exist;
+say so and stop.
 
 - **Attach** when `live` is set: never start a second process. Skip to step 5
   with `live.port`. `new` on a live board is an error.
@@ -150,19 +151,27 @@ WHITEBOARD_OWNER_SESSION="$OWNER_SESSION" WHITEBOARD_OWNER_SESSION_ID="$OWNER_SE
   bash scripts/whiteboard.sh start --detach --name "<name>" --repo . --scratch <scratch folder>
 ```
 
-`start --detach` creates the boards folder, starts the server in the background
-detached from your session (so it outlives a forced session end, writing its
-output to the board's `log`), waits until it is live, and prints the same JSON as
-`locate` with `live` set: take the port from `live.port`. The server claims the
-lock itself; you never write it. On a non-zero exit it has printed why, with the
-end of the log:
+`start --detach` creates the boards folder, starts the server in a session of
+its own (so neither a signal to your shell's process group nor a hangup of your
+terminal stops it; it writes its output to the board's `log`), waits until it is
+live, and prints the same JSON as `locate` with `live` set: take the port from
+`live.port`. The server claims the lock itself; you never write it.
+
+Exit 0 can also mean another session started the same board at the same moment
+and won: the JSON is then that server's. Compare `live.ownerSessionId` with your
+own session id, as in step 2: a match means you booted it and are its owner;
+otherwise you are a guest.
+
+On a non-zero exit it has printed why, with the end of the log:
 
 - **Exit 4**: another server already holds the board (its JSON is printed):
   attach to it as in step 2.
 - **Exit 3**: the runtime is not installed: go back to section 0.
-- **Exit 2**: not a board inside the repository.
+- **Exit 2**: not a `.tldr` inside the repository, or its folder does not exist.
 - **Exit 1**: the server refused or failed to start, for example a file it
   cannot load as a board (it never overwrites one). Show the user the reason.
+  If it says the board was not live in time, the server may still come up: run
+  `locate` again before you start another.
 
 **4. Wait for the render-canvas.** It is the agents' shared editor and the only
 thing that makes pixels. Poll until it is connected:
@@ -215,9 +224,11 @@ output (`references/harness-notes.md` says which harnesses can, and how).
 - **With background resume:** launch the poller **once as a background job**,
   then hand the turn back. The user can keep talking to you while it listens.
   Before handing the turn back, confirm your own waiter is parked:
-  `GET /canvas-status?sessionId=<sid>` must show `youParked:true`. If it does
-  not, launch a poller. On attach, if the instance has no parked lead
-  (`agentParked:false`), you become it.
+  `GET /canvas-status?sessionId=<sid>` must show `youParked:true`. A poller you
+  just launched takes a moment to park, so re-read it about once a second for
+  up to 5 seconds; only if it is still not `true` after that, launch a poller. A
+  second poller never ends by itself. On attach, if the instance has no parked
+  lead (`agentParked:false`), you become it.
 - **Without it:** run the poller **in the foreground as the last act of the
   turn**. It blocks until a Send arrives, and its output starts your next turn.
   You cannot converse while it listens, so tell the user at boot that they talk
