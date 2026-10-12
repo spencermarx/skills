@@ -24,7 +24,9 @@ written down rather than taste.
 
 - Wrappers around a single vendor's CLI or API.
 - Integrations that need credentials to do anything.
-- Skills whose value is a house style (voice, brand, folder conventions).
+- Skills whose value is a house style (voice, brand, folder conventions). A
+  skill that applies the user's own brand or voice, read from `docs/agents/`, is
+  a method; one that ships a brand or voice is a house style.
 - Duplicates of a skill in a well-maintained public catalog. Credit and point
   to it instead.
 

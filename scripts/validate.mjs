@@ -36,6 +36,37 @@ const COUPLINGS = [
   /\bspencer@/i, /\/Users\//, /\bACL-\d+/, /\bbizkit\b/i, /\bWrkbelt\b/i, /\bOperators\//,
 ];
 
+// Phrasings that name another skill. A reference to a skill that does not exist sends
+// the reader to nothing in every harness. Kept narrow on purpose: "use `x`" alone also
+// names CLIs and files, so it counts only before "instead" or a closing parenthesis (a
+// description's route), or paired with a name that is a skill.
+const SKILL_NAME = "`([a-z0-9]+(?:-[a-z0-9]+)*)`";
+const SKILL_REFS = [
+  new RegExp(`${SKILL_NAME}\\s+skill\\b`, "g"),
+  new RegExp(`\\b(?:[Ll]oad|[Ii]nvoke)\\s+(?:the\\s+)?${SKILL_NAME}`, "g"),
+  new RegExp(`\\b[Uu]se\\s+${SKILL_NAME}(?=\\s+instead\\b|\\))`, "g"),
+  new RegExp(`\\b[Uu]se\\s+${SKILL_NAME}\\s+(?:and|or)\\s+${SKILL_NAME}`, "g"),
+];
+// Skills a passage invents as an explicit example, never meant to resolve.
+const INVENTED_SKILLS = new Set(["make-chart"]);
+
+// A credit for ideas alone (a book, a method, a skill not vendored) opens with this
+// marker and needs no NOTICE section; every other credit names its source's URL.
+const IDEAS_ONLY = /^Ideas from /;
+const URL = /https?:\/\/[^\s),;]+/g;
+
+// The source URLs NOTICE carries a licence section for: each section's header line
+// sits between two rules of dashes and ends in the source's URL.
+function noticeSources() {
+  const lines = readFileSync(join(repo, "NOTICE"), "utf8").split("\n");
+  const rule = (l) => /^-{20,}$/.test(l?.trim() ?? "");
+  const out = new Set();
+  lines.forEach((l, i) => {
+    if (rule(lines[i - 1]) && rule(lines[i + 1])) for (const u of l.match(URL) ?? []) out.add(u.replace(/[.]$/, ""));
+  });
+  return out;
+}
+
 const errors = [];
 const fail = (file, msg) => errors.push(`${relative(repo, file)}: ${msg}`);
 
@@ -67,6 +98,8 @@ function* walk(dir) {
 
 const seen = new Map();
 const targets = process.argv.slice(2).length ? process.argv.slice(2).map((p) => join(process.cwd(), p)) : skillDirs();
+const allSkills = new Set(skillDirs().map((d) => basename(d)));
+const licensed = noticeSources();
 
 for (const dir of targets) {
   const file = join(dir, "SKILL.md");
@@ -95,10 +128,18 @@ for (const dir of targets) {
   for (const key of Object.keys(fm)) {
     if (!SPEC_KEYS.has(key) && !EXTRA_KEYS.has(key)) fail(file, `frontmatter key "${key}" is neither spec nor an allowed extra`);
   }
-  // Spec: metadata is a string-to-string map.
+  // Spec: metadata is a string-to-string map. One exception: `npx skills` installs a
+  // skill with the boolean `internal: true` only when it is named with --skill, which is
+  // how an incubating skill stays out of a bare install. Nowhere else may hide a skill.
+  const incubating = relative(repo, dir).split(/[\\/]/)[1] === "_incubating";
   if (fm.metadata !== undefined) {
-    if (typeof fm.metadata !== "object" || Array.isArray(fm.metadata)) fail(file, "metadata must be a map");
-    else for (const [k, v] of Object.entries(fm.metadata)) if (typeof v !== "string") fail(file, `metadata.${k} must be a string`);
+    if (typeof fm.metadata !== "object" || fm.metadata === null || Array.isArray(fm.metadata)) fail(file, "metadata must be a map");
+    else for (const [k, v] of Object.entries(fm.metadata)) {
+      if (k === "internal") {
+        if (!incubating) fail(file, "metadata.internal hides a skill from a bare install; only skills under skills/_incubating/ may set it");
+        else if (v !== true) fail(file, "metadata.internal must be exactly the boolean true (the installer ignores any other value)");
+      } else if (typeof v !== "string") fail(file, `metadata.${k} must be a string`);
+    }
   }
 
   // Codex reads its implicit-invocation policy from agents/openai.yaml, not frontmatter.
@@ -121,11 +162,25 @@ for (const dir of targets) {
       for (const [re, why] of BODY_BANS) if (re.test(line)) fail(`${f}:${i + 1}`, why);
       for (const re of COUPLINGS) if (re.test(line)) fail(`${f}:${i + 1}`, `workspace coupling (${re.source}); move it to docs/agents/ configuration`);
     });
+    // The whole file, frontmatter included, so a description's "(use `x`)" route and a
+    // reference wrapped across lines are both checked.
+    const whole = readFileSync(f, "utf8");
+    for (const re of SKILL_REFS) for (const m of whole.matchAll(re)) {
+      const names = m.slice(1).filter(Boolean);
+      if (names.length > 1 && !names.some((n) => allSkills.has(n))) continue;
+      for (const n of names) if (!allSkills.has(n) && !INVENTED_SKILLS.has(n)) {
+        fail(`${f}:${whole.slice(0, m.index).split("\n").length}`, `refers to the \`${n}\` skill, which is not in this catalog`);
+      }
+    }
   }
 
-  // A derived skill names its source; NOTICE carries the upstream licence.
-  if (fm.metadata?.credits && !readFileSync(join(repo, "NOTICE"), "utf8").includes("Matt Pocock") && /pocock/i.test(fm.metadata.credits)) {
-    fail(file, "credits Matt Pocock but NOTICE lacks his licence");
+  // A derived skill names its source; NOTICE carries the source's licence. An ideas-only
+  // credit says so with its marker, so a forgotten licence cannot pass as one.
+  const credits = fm.metadata?.credits;
+  if (typeof credits === "string" && !IDEAS_ONLY.test(credits)) {
+    const urls = (credits.match(URL) ?? []).map((u) => u.replace(/[.]$/, ""));
+    if (!urls.length) fail(file, `metadata.credits names no source URL; give one, or open it with "Ideas from " for a credit of ideas alone`);
+    for (const u of urls) if (!licensed.has(u)) fail(file, `metadata.credits names ${u}, but NOTICE has no section for it; add the source's licence there, or open the credit with "Ideas from " if no text was adapted`);
   }
 }
 

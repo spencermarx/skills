@@ -9,7 +9,7 @@ in at least one of them. `npm run check` enforces what can be enforced.
 
 ```
 skills/<family>/<skill>/SKILL.md     families: core planning engineering writing strategy harness visual
-skills/_incubating/<skill>/          public beta: installable by name, not in the plugin
+skills/_incubating/<skill>/          public beta: installed only by name (--skill), not in the plugin
 .claude-plugin/plugin.json           one plugin; "skills" lists every promoted skill path
 .claude-plugin/marketplace.json      the "aclarify" marketplace: this plugin + ocr
 evals/cases/                         routing evals for this repo's own skills (harness-eval's promptfoo format)
@@ -32,7 +32,9 @@ Claude Code.
    `license`, `compatibility`, `metadata`, `allowed-tools`. The only extras
    allowed are `disable-model-invocation`, `user-invocable` and `argument-hint`,
    which other harnesses ignore. `description` is at most 1024 characters with
-   the trigger first. `metadata` values are strings.
+   the trigger first. `metadata` values are strings, with one exception: a skill
+   under `skills/_incubating/` sets `internal: true`, a boolean, which the
+   `npx skills` installer reads as "install only when named with `--skill`".
 2. **User-invoked skills** (`disable-model-invocation: true`) also ship
    `agents/openai.yaml`, which is how Codex learns the same thing:
 
@@ -113,23 +115,44 @@ multi-context repository adds `GLOSSARY-MAP.md`), decision records in
 
 ## Credits
 
-A skill adapted from another project says so in frontmatter:
+A skill adapted from another project says so in frontmatter, naming the
+project's URL:
 
 ```yaml
 metadata:
   credits: "Adapted from Matt Pocock's grill-me skill, https://github.com/mattpocock/skills (MIT)"
 ```
 
-and, when text was copied or adapted from a licensed project, that project's
-licence goes in `NOTICE`. Credit what the skill draws on, even when it has been
-rewritten; a credit for ideas alone (a book, a method) needs no `NOTICE` entry.
+When text was copied or adapted, even in paraphrase, that project's licence goes
+in `NOTICE`, in a section whose header line ends with the same URL. Credit what
+the skill draws on, even when it has been rewritten. A credit for ideas alone (a
+book, a method, a skill read but not adapted) opens with `Ideas from ` and needs
+no `NOTICE` section:
+
+```yaml
+metadata:
+  credits: "Ideas from John Ousterhout's A Philosophy of Software Design"
+```
+
+`npm run check` fails a credit whose URL has no `NOTICE` section, and a credit
+that names no URL and does not open with that marker.
 
 ## Lifecycle
 
-New skills start in `skills/_incubating/`. Promote one by moving its folder into
-a family and running `npm run sync`. A retired skill is deleted; its changeset
-names the replacement. A skill that does not meet `SCOPE.md` belongs in
-`.out-of-scope/` as a reasoned note, not in the tree.
+New skills start in `skills/_incubating/`, with `metadata.internal: true`, so a
+bare `npx skills add` leaves them out and `--skill <name>` installs one; the
+plugin does not list them. A skill moves into a family once it has been used for
+real and its routing cases in `evals/cases/` show it fires when it should and
+stays quiet when it should not. Promote one by moving its folder into a family,
+deleting `internal`, and running `npm run sync`. A skill ported from an
+established source (a maintained public catalog, or a skill long in use in
+another repository) may enter a family directly, but it still carries routing
+cases in `evals/cases/`: a should-fire case and the near miss most likely to
+steal it.
+
+A retired skill is deleted; its changeset names the replacement. A skill that
+does not meet `SCOPE.md` belongs in `.out-of-scope/` as a reasoned note, not in
+the tree.
 
 ## Checks and releases
 

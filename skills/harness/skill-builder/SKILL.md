@@ -11,7 +11,7 @@ description: >-
   `standards`), or for the craft of agent-facing prose in general (use `writing-for-agents`).
 license: MIT
 metadata:
-  credits: "Draws on Anthropic's skill-creator skill, https://github.com/anthropics/skills (Apache-2.0)"
+  credits: "Partly adapted from Anthropic's skill-creator skill, https://github.com/anthropics/skills (Apache-2.0)"
 ---
 
 # skill-builder

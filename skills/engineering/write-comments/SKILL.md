@@ -11,7 +11,7 @@ description: >-
 license: MIT
 argument-hint: '[optional: the function, file or module being authored]'
 metadata:
-  credits: "Principles from John Ousterhout's A Philosophy of Software Design"
+  credits: "Ideas from John Ousterhout's A Philosophy of Software Design"
 ---
 
 # Write Comments

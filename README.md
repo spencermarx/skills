@@ -115,16 +115,18 @@ skill works without it, on stated defaults.
 
 ### Incubating
 
-Public beta: installable by name (`npx skills add spencermarx/skills#stable --skill <name>`), not yet in the plugin.
+Public beta, installed only by name: a bare `npx skills add` leaves these out, and
+`npx skills add spencermarx/skills#stable --skill <name>` installs one. They are not in the plugin yet.
 
 - `whiteboard`: a live tldraw board you and your agents draw on together, in your browser. It installs tldraw, Vite and Playwright's Chromium on first use, after asking; tldraw is under [its own licence](https://github.com/tldraw/tldraw/blob/main/LICENSE.md), which allows local development use.
 
 ## Credits
 
 Several skills are adapted from [Matt Pocock's skills](https://github.com/mattpocock/skills)
-(MIT), and `humanize`'s tell catalogs from Sergey Bulaev's
-[linkedin-skills](https://github.com/sergebulaev/linkedin-skills) (MIT). Each skill says so in
-its frontmatter, and `NOTICE` carries the licences.
+(MIT), `humanize`'s tell catalogs from Sergey Bulaev's
+[linkedin-skills](https://github.com/sergebulaev/linkedin-skills) (MIT), and parts of
+`skill-builder` from Anthropic's skill-creator in [anthropics/skills](https://github.com/anthropics/skills)
+(Apache-2.0). Each skill says so in its frontmatter, and `NOTICE` carries the licences.
 
 ## Contributing
 

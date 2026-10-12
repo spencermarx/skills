@@ -1,0 +1,44 @@
+# The visual family: looking up the brand, building a deck, and designing a product
+# interface, each against the neighbour most likely to steal it. Auditing finished
+# creative against the brand is brand-review, in strategy.yaml.
+#
+#   bash skills/harness/harness-eval/scripts/run.sh --skills skills evals/cases/visual.yaml --repeat 3
+
+- description: "a brand value needed while making an asset"
+  vars:
+    query: what's our primary brand colour and heading font? I'm making an
+      Instagram graphic for the launch
+  assert:
+    - type: skill-used
+      value: get-brand-kit
+    - type: not-skill-used
+      value: brand-review
+    - type: not-skill-used
+      value: design-expert
+- description: "a deck to present"
+  vars:
+    query: build a ten-slide pitch deck for our seed round
+  assert:
+    - type: skill-used
+      value: create-html-slides
+    - type: not-skill-used
+      value: design-expert
+- description: "a write-up read on screen, not a deck"
+  vars:
+    query: turn this markdown audit into a visual HTML report I can share
+  assert:
+    - type: skill-used
+      value: create-report
+    - type: not-skill-used
+      value: create-html-slides
+- description: "a product screen that looks off"
+  vars:
+    query: the settings screen in our app looks off; fix the visual hierarchy and
+      the spacing
+  assert:
+    - type: skill-used
+      value: design-expert
+    - type: not-skill-used
+      value: brand-review
+    - type: not-skill-used
+      value: prototype

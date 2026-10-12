@@ -28,4 +28,8 @@ requests without an issue.
 
 New skills start in `skills/_incubating/`. They move into a family once they
 have been used for real and the routing evals in `evals/cases/` show they fire
-when they should and stay quiet when they should not.
+when they should and stay quiet when they should not. A skill ported from an
+established source (a maintained public catalog, or a skill long in use in
+another repository) may enter a family directly, but it still carries routing
+cases in `evals/cases/`. The lifecycle in [`AGENTS.md`](AGENTS.md) has the
+details.
