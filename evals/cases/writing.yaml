@@ -1,0 +1,52 @@
+# The writing family: five skills that all touch "a piece of writing". Each case names the
+# neighbour most likely to steal it.
+#
+#   bash skills/harness/harness-eval/scripts/run.sh --skills skills evals/cases/writing.yaml --repeat 3
+
+- description: "nothing written yet: gather, don't draft"
+  vars:
+    query: I want to write an essay about why our team stopped estimating, but I
+      have nothing written yet
+  assert:
+    - type: skill-used
+      value: gather-argument-material
+    - type: not-skill-used
+      value: draft-argued-piece
+- description: "a pile exists: draft the argued piece"
+  vars:
+    query: I've got a pile of notes on onboarding; turn them into the blog post
+  assert:
+    - type: skill-used
+      value: draft-argued-piece
+    - type: not-skill-used
+      value: gather-argument-material
+    - type: not-skill-used
+      value: draft-conversion-copy
+- description: an ask, not an argument
+  vars:
+    query: write the cold email to heads of operations at logistics firms
+  assert:
+    - type: skill-used
+      value: draft-conversion-copy
+    - type: not-skill-used
+      value: draft-argued-piece
+    - type: not-skill-used
+      value: seven-copy-critics
+- description: existing text that reads machine-made
+  vars:
+    query: this paragraph reads like ChatGPT wrote it, make it sound like me
+  assert:
+    - type: skill-used
+      value: humanize
+    - type: not-skill-used
+      value: seven-copy-critics
+- description: review drafted copy for conversion
+  vars:
+    query: tear apart this landing page copy before we publish it
+  assert:
+    - type: skill-used
+      value: seven-copy-critics
+    - type: not-skill-used
+      value: draft-conversion-copy
+    - type: not-skill-used
+      value: humanize
