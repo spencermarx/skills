@@ -1007,9 +1007,14 @@ side-table, no separate persistence.
   wherever the `.tldr` itself is; nothing but the board is ever written into a tracked folder.
   `whiteboard.sh locate --board <file>` prints a board's room id, sidecar paths and live lock.
   Board paths a request names must be `.tldr` files inside the repository or the boards folder.
-- **Lockfile = discovery + one-server guard.** On boot the process writes
-  `<scratch>/whiteboard/<room>.lock` = `{ port, pid, board (the room id), path, name, startedAt,
-  ownerSession?, ownerSessionId? }`. Its jobs: (1) the next `/whiteboard` for that board reads it to find the
+- **Lockfile = discovery + one-server guard.** On boot the process claims
+  `<scratch>/whiteboard/<room>.lock` = `{ port, pid, room, path, name, startedAt,
+  ownerSession?, ownerSessionId? }`. **[v9.9]** The claim is an exclusive create (a fully written
+  temp file hard-linked into place, so no reader ever sees half a lock) made **before** `listen`,
+  with `port: 0` until the server listens and fills it in. An existing lock is probed: a live server
+  answering for the room, or one still starting (`port: 0`, live pid, claimed under a minute ago),
+  keeps it and the newcomer exits 4; a stale one is removed, only if unchanged since it was judged,
+  and the claim retried once. Its jobs: (1) the next `/whiteboard` for that board reads it to find the
   running port and **attach**; (2) it stops a **second server process** from hosting the same board;
   **[v9.6]** (3) it records **whose** session booted the board, so a second session can tell it is a
   guest (below). It is **not** a session limit — any number of agent sessions and human browsers
@@ -1041,6 +1046,10 @@ side-table, no separate persistence.
   that owner's port; only an unowned or stale-locked board is switched-to in-process. Without this
   the switch stole the target's lock unconditionally, producing a **two-processes-on-one-board
   split-brain** (a parked waiter on one process, the operator's Send on the other, never meeting).
+  **[v9.9]** The switch claims the target's lock with the same exclusive create as boot, and the
+  room it leaves is **evicted**: flushed if it changed, its peers disconnected, removed from the
+  joinable rooms, and only then its lock released. So "holds the lock" and "serves the room" are
+  one fact: a process never keeps serving a room whose lock it gave up.
 - **[v8] Defect fixed by prevention: the per-board message store (`<name>.messages.jsonl`) is
   cached per-process and never re-read**, so two processes on one board would silently diverge (a
   full-file `rewriteMessages` on one clobbers the other's appends). The one-server guard makes
@@ -1048,14 +1057,27 @@ side-table, no separate persistence.
   re-read mechanism; a re-read would guard a state the guard already prevents.
 - **[v9.9] The boot path honors it too.** `whiteboard.sh start` and the server's own boot both
   refuse (exit 4) a board whose lock has a live foreign owner, so a second `start` never steals the
-  lock. The server also refuses to boot onto a board outside the repository, or one it cannot load.
+  lock. The server also refuses to boot onto a board outside the repository, in a folder that does
+  not exist, or one it cannot load. `whiteboard.sh start` applies the placement rule
+  (`boards.mjs`) before it creates anything, then creates the boards folder and opens the board's
+  log itself, so the first boot in a fresh repository has somewhere to write.
 - **[v9.9] A board file the server cannot load is refused, never replaced.** Unparseable JSON,
   tldraw.com's own `{tldrawFileFormatVersion, records}` format, or anything `TLSocketRoom` cannot
   construct from is a 4xx on the HTTP routes and a refused `/sync/` upgrade; the room is not cached
   and so never persisted. Only rooms that changed are written, by temp file and rename.
-- **Race caveat (accepted for a solo POC):** two *simultaneous* launches of the same board could
-  both boot (the guard's liveness check has a TOCTOU window a single operator does not hit); a
-  single operator does not race themselves.
+- **[v9.9] Simultaneous launches.** Of two servers started at the same instant on one board,
+  exactly one boots: the exclusive claim decides, and the other exits 4. `whiteboard.sh start
+  --detach` then waits for whichever server comes up and prints its lock.
+- **[v9.9] Only its own clients.** Each request and WebSocket upgrade must name a loopback `Host`
+  for this port (DNS rebinding); a `Sec-Fetch-Site` other than `same-origin` or `none` is refused
+  (a page on another origin, including another port of 127.0.0.1 or localhost, which browsers
+  mark `same-site`), and so is any `Origin` but the server's own. A browser sends no `Origin` on a
+  no-cors fetch, an `<img>` or a navigation, so `Sec-Fetch-Site` is what stops a foreign page's GET
+  (`/next-instruction` drains and parks). The app's static files are served after the Host check
+  and before the rest, so a link to a board still loads. Non-browser clients (curl, `poll.sh`,
+  the liveness probe) send neither header; the probe counts a 403 as live, never as stale. The
+  render-canvas's `/events` slot (`role=agent`) also needs a per-process key that only the
+  server's own Playwright page is given.
 
 ### 8.4 Board discovery
 

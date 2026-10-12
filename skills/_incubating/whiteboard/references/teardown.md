@@ -33,12 +33,15 @@ the live room to the board's `.tldr` within about two seconds of each change.
    The board file is the `board` path `whiteboard.sh locate` prints. The copy
    must be inside the repository.
 2. **To keep working on the copy, the operator picks it in the panel's board
-   switcher**, which lists every `.tldr` in the repository. Tell them so in an
-   `/agent-message`. The switcher moves the server, the render-canvas and their
-   browser onto the copy together. The copy is a board of its own: its own room,
-   lock and chat log in the boards folder, and the old file stays where it was.
-   Finish and ack the Send you are working first, because the queue belongs to
-   the room you are leaving.
+   switcher.** The switcher lists the boards folder and the `.tldr` files it
+   finds in the repository; it skips `node_modules`, `.git`, symlinks
+   and anything more than eight folders deep, so copy the board somewhere it
+   looks. Tell the operator in an `/agent-message`. The switcher moves the
+   server, the render-canvas and their browser onto the copy together. The copy
+   is a board of its own: its own room, lock and chat log in the boards folder,
+   and the old file stays where it was. The server stops serving the old room
+   (anyone still on it is disconnected), so finish and ack the Send you are
+   working first, because the queue belongs to the room you are leaving.
 3. **Commit the copy** whenever the operator wants. While the server hosts it,
    the server keeps writing the operator's edits into it.
 

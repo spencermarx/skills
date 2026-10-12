@@ -29,9 +29,13 @@ bridge and the sync server, bound to `127.0.0.1` on a port the OS assigns. There
 is no fixed port: read it from the board's lock and use it for the browser and
 every request. The lock records that port, so a second session on the same board
 **attaches** instead of starting a rival server, and the server refuses to start
-on a board another live server holds. The server answers only its own clients:
-requests must address `127.0.0.1:<port>` or `localhost:<port>`, and a browser
-page from any other origin is refused.
+on a board another live server holds or is starting on. The server answers only
+its own clients: requests must address `127.0.0.1:<port>` or `localhost:<port>`;
+a browser request that says it comes from another site (any `Sec-Fetch-Site`
+but `same-origin` or `none`, which covers a page on another port of the same
+host) or carries another page's `Origin` is refused. Only the app's own files
+load from a link on another site. Your `curl` calls and the poller send neither
+header, so they are unaffected.
 
 Paths below are relative to this skill's directory; resolve them to absolute
 paths before running anything. Run commands from the repository root.
@@ -82,8 +86,8 @@ bash scripts/whiteboard.sh status --repo . --scratch <scratch folder>
   plain text and stop until they reply. On a yes, run
   `bash scripts/whiteboard.sh install --repo . --scratch <scratch folder>`. If it
   fails, show the command it printed for the user to run.
-- **Exit 1**: a precondition failed (usually Node.js missing or too old). Show the
-  message and stop.
+- **Exit 1**: a precondition failed (Node.js or npm missing, or Node.js too old).
+  Show the message and stop; an install cannot succeed until it is fixed.
 
 The check runs again on every boot, so a skill update that changes the app or its
 pins asks for a fresh install. When this skill's folder is read-only (a plugin
@@ -91,33 +95,39 @@ cache), the runtime installs into `<scratch folder>/whiteboard-runtime/` instead
 
 ## 1. Boot
 
-**1. Resolve the board file.**
+**1. Resolve the board.** A board is named one of two ways in every command
+below: `--name "<name>"` for a board in the boards folder, or `--board "<path>"`
+for a `.tldr` file.
 
-- `open <name>`: `<boards folder>/<name>.tldr`.
-- `open <path>`: that `.tldr` file, which must be inside the repository. A path
+- `open <name>`: `--name "<name>"`. The script turns the name into the file name
+  by the same rule the panel's "new board" uses, so "Sales Engine Design" is
+  `<boards folder>/Sales-Engine-Design.tldr`.
+- `open <path>`: `--board "<path>"`, a `.tldr` file inside the repository. A path
   is anything with a `/` or ending in `.tldr`.
-- Either way the file must already exist; error if it does not. `open` never
-  creates.
-- `new <name>`: `<boards folder>/<slug>.tldr`, the slug made from the name. Error
-  if it already exists. Never reuse or overwrite; `open` is for an existing board.
-- No argument: the most recently modified `.tldr` in the boards folder, else `new`
-  with a default name.
+- Either way the file must already exist (`locate` prints its `board` path; check
+  it); error if it does not. `open` never creates.
+- `new <name>`: `--name "<name>"`. Error if the `board` path `locate` prints
+  already exists. Never reuse or overwrite; `open` is for an existing board.
+- No argument: the most recently modified `.tldr` in the boards folder (by
+  `--board`), else `new` with a default name.
 
-Name boards in spaced Title Case for people ("Sales Engine Design") and slug the
-file name from it.
+Name boards in spaced Title Case for people ("Sales Engine Design"); the script
+makes the file name from it.
 
 **2. Locate it: attach or boot.**
 
 ```bash
-bash scripts/whiteboard.sh locate --board "<board file>" --repo . --scratch <scratch folder>
+bash scripts/whiteboard.sh locate --name "<name>" --repo . --scratch <scratch folder>
+# or: --board "<board file>" in place of --name
 ```
 
 It prints one JSON object: `{ board, name, room, lock, messages, png, log, live }`.
 `board` is the file's canonical path, `room` its room id, and `lock` and `log`
 its files in the boards folder. `live` is the lock's contents,
-`{ port, pid, board, path, name, startedAt, ownerSession?, ownerSessionId? }`,
+`{ port, pid, room, path, name, startedAt, ownerSession?, ownerSessionId? }`,
 when a server holding it is running (its pid is alive and its port answers for
-this room), else `null`. Read every field by name; the shapes grow.
+this room), else `null`. Read every field by name; the shapes grow. Exit 2 means
+the path is not a `.tldr` inside the repository; say so and stop.
 
 - **Attach** when `live` is set: never start a second process. Skip to step 5
   with `live.port`. `new` on a live board is an error.
@@ -133,22 +143,26 @@ this room), else `null`. Read every field by name; the shapes grow.
 
 **3. Start the server.** Resolve your session's identity first
 (`references/harness-notes.md`, "Who is this session"); an empty value is safe and
-just records no owner. Start the server detached from your session, so it outlives
-a forced session end, appending its output to the board's log (the `log` path
-from step 2):
+just records no owner. Then start it with the same `--name` or `--board` as step 2:
 
 ```bash
 WHITEBOARD_OWNER_SESSION="$OWNER_SESSION" WHITEBOARD_OWNER_SESSION_ID="$OWNER_SESSION_ID" \
-  nohup bash scripts/whiteboard.sh start --board "<board file>" \
-  --repo . --scratch <scratch folder> >> "<log>" 2>&1 &
+  bash scripts/whiteboard.sh start --detach --name "<name>" --repo . --scratch <scratch folder>
 ```
 
-Then run `locate` again until `live` is set, and take the port from `live.port`.
-The server writes the lock itself once it is listening; you never write it. If
-`live` is still `null` after about 30 seconds, read the end of `<log>`: the server
-refuses to start, saying why, on a board outside the repository, a file it cannot
-load as a board (it never overwrites one), and a board another live server holds
-(attach to that one instead).
+`start --detach` creates the boards folder, starts the server in the background
+detached from your session (so it outlives a forced session end, writing its
+output to the board's `log`), waits until it is live, and prints the same JSON as
+`locate` with `live` set: take the port from `live.port`. The server claims the
+lock itself; you never write it. On a non-zero exit it has printed why, with the
+end of the log:
+
+- **Exit 4**: another server already holds the board (its JSON is printed):
+  attach to it as in step 2.
+- **Exit 3**: the runtime is not installed: go back to section 0.
+- **Exit 2**: not a board inside the repository.
+- **Exit 1**: the server refused or failed to start, for example a file it
+  cannot load as a board (it never overwrites one). Show the user the reason.
 
 **4. Wait for the render-canvas.** It is the agents' shared editor and the only
 thing that makes pixels. Poll until it is connected:
@@ -200,9 +214,10 @@ output (`references/harness-notes.md` says which harnesses can, and how).
 
 - **With background resume:** launch the poller **once as a background job**,
   then hand the turn back. The user can keep talking to you while it listens.
-  Before handing the turn back, confirm a waiter is parked: `GET /canvas-status`
-  must show `agentParked:true`. If it does not, launch a poller. On attach, if the
-  instance has no parked lead, you become it.
+  Before handing the turn back, confirm your own waiter is parked:
+  `GET /canvas-status?sessionId=<sid>` must show `youParked:true`. If it does
+  not, launch a poller. On attach, if the instance has no parked lead
+  (`agentParked:false`), you become it.
 - **Without it:** run the poller **in the foreground as the last act of the
   turn**. It blocks until a Send arrives, and its output starts your next turn.
   You cannot converse while it listens, so tell the user at boot that they talk
