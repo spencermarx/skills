@@ -2,6 +2,8 @@
 // they never ship inside the skill. The poller test needs only node and curl; the server suites
 // boot the real bridge headless, so they need only the server's dependencies
 // (`npm ci --prefix skills/_incubating/whiteboard/server`, which CI runs) and skip without them.
+// The cases that need Chromium or the full runtime (the real-browser boundaries, detach.test.mjs)
+// skip themselves where it is not installed, as in CI; run them locally after `whiteboard.sh install`.
 // Each suite works in its own temp repository and stops every server it starts (harness.mjs).
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -72,6 +74,18 @@ test("whiteboard.sh start: a board outside the repository is refused before anyt
   }
   assert.ok(!existsSync(join(copy, "elsewhere")), "no folder was created outside the repository");
   assert.ok(!existsSync(join(repo, ".scratchpad")), "nor the boards folder");
+});
+
+test("whiteboard.sh start: a board in a folder that does not exist is refused before anything is created", () => {
+  const { repo, sh } = bareSkill();
+  const missing = join(repo, "no-such-folder", "x.tldr");
+  for (const args of [["start"], ["start", "--detach"], ["locate"]]) {
+    const run = sh(...args, "--board", missing);
+    assert.equal(run.status, 2, `${args.join(" ")}: ${run.stderr}`);
+    assert.match(run.stderr, /folder does not exist/);
+  }
+  assert.ok(!existsSync(join(repo, "no-such-folder")), "the board's folder was not created");
+  assert.ok(!existsSync(join(repo, ".scratchpad")), "nor the boards folder or a log");
 });
 
 test("whiteboard.sh start: in a repository with no scratch folder, it creates the boards folder and the board's log", () => {

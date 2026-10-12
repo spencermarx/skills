@@ -7,7 +7,9 @@
 //      Playwright's Chromium is installed, from real pages on localhost:<other> and
 //      127.0.0.1:<other>). A rebinding Host is refused, a sync room id cannot name a path, the
 //      render-canvas slot needs the server's canvas key, and the control POSTs need a JSON
-//      content-type (which no cross-site page can send without a preflight).
+//      content-type (which no cross-site page can send without a preflight). No response may be
+//      framed, so a foreign page's <iframe> of the app joins nothing. The liveness probe confirms
+//      only this server: a foreign server's 403 reads as not live.
 //   2. A board file it cannot load is refused and left byte-identical: unparseable JSON,
 //      tldraw.com's own file format, anything that is not a .tldr, anything outside the
 //      repository. The server stays up, and a board that only loaded is never rewritten.
@@ -17,7 +19,9 @@
 //      server is still starting on is refused, and a room switched away from is evicted, so no
 //      two processes ever serve one board.
 //   5. Board paths: one identity through a symlinked folder that does not exist yet, no board in
-//      a folder that does not exist, one slug rule for names, and crash-left temp files swept.
+//      a folder that does not exist (refused alike by locate, start and the server), one slug rule
+//      for names, and crash-left temp files swept once a board loads, never a user's file or a
+//      live writer's.
 //
 //   node tests/whiteboard/boundaries.test.mjs
 
@@ -62,13 +66,13 @@ function writeFile(p, body) {
 }
 const sameBytes = (p, bytes) => fs.existsSync(p) && fs.readFileSync(p).equals(bytes);
 
-// A raw HTTP request, so a test controls Host and Origin. Resolves { status, body }.
+// A raw HTTP request, so a test controls Host and Origin. Resolves { status, body, headers }.
 function request(port, { method = 'GET', path: p = '/', headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {
     const req = http.request({ host: '127.0.0.1', port, method, path: p, headers }, (res) => {
       let raw = '';
       res.on('data', (c) => (raw += c));
-      res.on('end', () => resolve({ status: res.statusCode, body: raw }));
+      res.on('end', () => resolve({ status: res.statusCode, body: raw, headers: res.headers }));
     });
     req.on('error', reject);
     if (body !== undefined) req.write(body);
@@ -189,6 +193,24 @@ async function clientBoundary() {
   }
   eq((await request(port, { path: '/canvas-status' })).status, 200, 'a client that sends no Sec-Fetch-Site (curl, poll.sh) is allowed');
   eq(await boards.probeCanvasStatus(port, room), true, 'the liveness probe still confirms the live server');
+  const foreign403 = http.createServer((_req, res) => { res.statusCode = 403; res.end('{"error":"no"}'); });
+  await new Promise((resolve) => foreign403.listen(0, '127.0.0.1', resolve));
+  const foreign403Port = foreign403.address().port;
+  eq(await boards.probeCanvasStatus(foreign403Port, room), false, 'a foreign server answering 403 does not read as live');
+  const reusedLock = SB.board('bd_reused_pid');
+  fs.writeFileSync(SB.files(reusedLock).lock, JSON.stringify({ port: foreign403Port, pid: process.pid, room: SB.room(reusedLock), startedAt: Date.now() }));
+  eq(await boards.liveOwner(SB.home, SB.room(reusedLock)), null, 'so a lock whose live pid was reused, on a port a foreign server answers 403, is stale');
+  eq(whiteboardSh('locate', '--board', reusedLock).status, 0, 'and whiteboard.sh locate reports that board as not live');
+  fs.rmSync(SB.files(reusedLock).lock);
+  foreign403.close();
+
+  console.log('\n[1] no response may be framed');
+  for (const [label, p] of [['the app at /', '/'], ['an API response', '/canvas-status'], ['a refused request', '/next-instruction']]) {
+    const headers = p === '/next-instruction' ? { 'Sec-Fetch-Site': 'cross-site' } : {};
+    const r = await request(port, { path: p, headers });
+    ok(r.headers['x-frame-options'] === 'DENY' && r.headers['content-security-policy'] === "frame-ancestors 'none'",
+      `${label} (status ${r.status}) carries X-Frame-Options: DENY and frame-ancestors 'none'`);
+  }
   const ownPoll = await request(port, { path: '/next-instruction', headers: { 'Sec-Fetch-Site': 'same-origin' } });
   eq(ownPoll.status === 200 && JSON.parse(ownPoll.body).id, 'fm-1', 'a same-origin poll is served the queued Send');
   if (fs.existsSync(path.join(SKILL_DIR, 'app', 'dist', 'index.html'))) {
@@ -394,6 +416,34 @@ async function browserBoundary() {
     eq((await own.goto(`http://127.0.0.1:${port}/canvas-status`))?.status(), 200, 'a typed URL (Sec-Fetch-Site: none) reaches the bridge');
     eq(await own.evaluate(() => fetch('/canvas-status').then((r) => r.status)), 200, 'the server\'s own page reaches it (Sec-Fetch-Site: same-origin)');
     await own.close();
+
+    console.log('\n[1] a foreign page cannot frame the app');
+    const appUrl = `http://127.0.0.1:${port}/?role=human&room=${room}&author=Framed&authorKey=framed`;
+    const humans = async () => (await json(port, '/canvas-status')).humans;
+    if (fs.existsSync(path.join(SKILL_DIR, 'app', 'dist', 'index.html'))) {
+      const top = await browser.newPage();
+      await top.goto(appUrl);
+      let joined = false;
+      for (let i = 0; i < 40 && !joined; i++) { joined = (await humans()) > 0; if (!joined) await sleep(250); }
+      ok(joined, 'the app loaded as a top-level page joins as a human (the control)');
+      await top.close();
+      for (let i = 0; i < 40 && (await humans()) > 0; i++) await sleep(250);
+    }
+    eq(await humans(), 0, 'no human is connected before the frame');
+    const logMark = server.output.length;
+    const framer = await browser.newPage();
+    await framer.goto(`http://localhost:${foreignPort}/`);
+    await framer.evaluate((src) => new Promise((done) => {
+      const frame = document.createElement('iframe');
+      frame.onload = done;
+      frame.src = src;
+      document.body.appendChild(frame);
+      setTimeout(done, 3000);
+    }), appUrl);
+    await sleep(3000);
+    eq(await humans(), 0, 'a foreign page that frames the app adds no human to /canvas-status');
+    ok(!/peer joined room/.test(server.output.slice(logMark)), 'and the framed app never joined the sync room');
+    await framer.close();
   } finally {
     await browser.close();
     foreign.close();
@@ -494,6 +544,14 @@ async function placement() {
   eq((await postJson(port, '/board/open', { path: 'linkdir/sub2/y.tldr' })).status, 403, '/board/open refuses a path that leaves the repository through a symlink');
   eq((await postJson(port, '/board/open', { path: 'no-such-folder/new.tldr' })).status, 400, '/board/open refuses a board in a folder that does not exist');
   ok(!fs.existsSync(path.join(SB.root, 'no-such-folder')), 'and creates no folder');
+  for (const cmd of [['locate'], ['start'], ['start', '--detach']]) {
+    const run = whiteboardSh(...cmd, '--board', path.join(SB.root, 'no-such-folder', 'new.tldr'));
+    eq(run.status, 2, `whiteboard.sh ${cmd.join(' ')} refuses a board in a folder that does not exist (exit 2)`);
+    ok(/folder does not exist/.test(run.stderr), `and says why (${cmd.join(' ')})`);
+  }
+  ok(!fs.existsSync(path.join(SB.root, 'no-such-folder')), 'and none of them creates the folder');
+  const missingBoot = startServer(SB, path.join(SB.root, 'no-such-folder', 'new.tldr'));
+  eq((await missingBoot.exited).code, 2, 'the server refuses to boot onto a board in a folder that does not exist (exit 2)');
   const made = await postJson(port, '/board/new', { name: 'Sales Engine Design' });
   eq(made.body?.path, path.join(SB.home, 'Sales-Engine-Design.tldr'), 'the panel\'s new board is named by the slug rule');
   const located = whiteboardSh('locate', '--name', 'Sales Engine Design');
@@ -508,12 +566,21 @@ async function placement() {
   const deadPid = spawnSync('true').pid;
   const crashTemp = path.join(SB.root, 'docs', `.swept.tldr.${deadPid}.1.tmp`);
   const otherTemp = path.join(SB.root, 'docs', `.other.tldr.${deadPid}.1.tmp`);
-  fs.writeFileSync(crashTemp, '{"partial":');
-  fs.writeFileSync(otherTemp, '{"partial":');
+  const usersFile = path.join(SB.root, 'docs', '.swept.tldr.my-notes.tmp');
+  const liveWriterTemp = path.join(SB.root, 'docs', `.swept.tldr.${process.pid}.7.tmp`);
+  for (const f of [crashTemp, otherTemp, usersFile, liveWriterTemp]) fs.writeFileSync(f, '{"partial":');
+  const broken = path.join(SB.root, 'docs', 'unloadable.tldr');
+  writeFile(broken, 'not json');
+  const brokenTemp = path.join(SB.root, 'docs', `.unloadable.tldr.${deadPid}.1.tmp`);
+  fs.writeFileSync(brokenTemp, '{"partial":');
+  eq((await postJson(port, '/board/open', { path: broken })).status, 422, 'a board that cannot load is refused');
+  ok(fs.existsSync(brokenTemp), 'and its temp files are not swept, since nothing loaded');
   eq((await postJson(port, '/board/open', { path: swept })).status, 200, 'the board opens');
   ok(!fs.existsSync(crashTemp), 'its crash-left temp file is gone');
   ok(fs.existsSync(otherTemp), 'another board\'s temp file is left alone');
-  fs.rmSync(otherTemp);
+  ok(fs.existsSync(usersFile), 'a file of the user\'s that only starts with the board\'s name is left alone');
+  ok(fs.existsSync(liveWriterTemp), 'a temp file whose writer is still running is left alone');
+  for (const f of [otherTemp, usersFile, liveWriterTemp, brokenTemp]) fs.rmSync(f);
   await postJson(port, '/done', {});
   await server.exited;
 }

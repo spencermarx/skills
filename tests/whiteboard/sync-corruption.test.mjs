@@ -24,9 +24,12 @@
 // sequence with WHITEBOARD_NO_SYNC_GUARD=1 (the guard disabled, i.e. pre-v9.5 behavior) and the
 // well-formed shape NEVER reaches the room: that is the frozen board the fix repairs. Board Z proves
 // the honest contract: a silent poison (corrupt-without-throwing) that App.tsx reports ok:true for
-// is reported ok:false by the server, because the write did not reach the room.
+// is reported ok:false by the server, because the write did not reach the room. Board E reuses the
+// headless canvas to change a board that cannot be saved: a switch away from it is refused, and
+// the board stays served, locked and unchanged until it can be saved.
 
 import { setTimeout as sleep } from 'node:timers/promises';
+import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { CANVAS_KEY, SERVER_DIR, sandbox, startServer, stopServer, stopAllServers } from './harness.mjs';
@@ -280,6 +283,42 @@ async function main() {
   fakeZ.close();
   srvZ.kill('SIGTERM');
   await sleep(300);
+
+  // ── Board E: a switch away from a board whose changes cannot be saved is refused. ─────────────
+  // Its folder is read-only, so the room changes but cannot be flushed. Evicting it would lose the
+  // change, so the server keeps it, its peers and its lock, and refuses the switch.
+  const roDir = path.join(SB.root, 'read-only');
+  fs.mkdirSync(roDir);
+  const boardE = path.join(roDir, 'e.tldr');
+  const roomE = SB.room(boardE);
+  const srvE = startServer(SB, boardE);
+  const portE = await srvE._port;
+  const fakeE = new FakeCanvas(portE, roomE);
+  await fakeE.connect();
+  console.log(`\n[E unsaveable switch] port=${portE}`);
+  fs.chmodSync(roDir, 0o555);
+  try {
+    await post(portE, '/exec', { code: validCode('shape:e_good', 0) });
+    ok((await waitRoomShapes(portE, 1, 4000)) >= 1, 'E: the change reached the room');
+    const target = SB.board('wbsync_e_target');
+    const switched = await fetch(`http://127.0.0.1:${portE}/board/open`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: target }),
+    });
+    ok(switched.status === 503, `E: the switch is refused (status ${switched.status})`);
+    const status = await getJson(portE, '/canvas-status');
+    ok(status.activeRoom === roomE, 'E: the server still serves the board it could not save');
+    ok(status.roomShapes >= 1, 'E: and its room still holds the change');
+    ok(fs.existsSync(SB.files(boardE).lock), 'E: its lock is kept');
+    ok(!fs.existsSync(SB.files(target).lock), 'E: the target board\'s lock was released');
+    const msgs = (await getJson(portE, '/messages')).messages ?? [];
+    ok(msgs.some((m) => typeof m.text === 'string' && m.text.startsWith('Switching boards was refused')), 'E: the panel says the switch was refused, and why');
+  } finally {
+    fs.chmodSync(roDir, 0o755);
+  }
+  fakeE.close();
+  await post(portE, '/done', {});
+  await srvE.exited;
+  ok(fs.existsSync(boardE) && fs.readFileSync(boardE, 'utf8').includes('shape:e_good'), 'E: once the folder is writable again, closing saves the change');
 
   console.log(`\n${failures.length ? 'FAIL' : 'PASS'} — ${passed} checks passed, ${failures.length} failed`);
   if (failures.length) { for (const f of failures) console.log(`  - ${f}`); process.exitCode = 1; }

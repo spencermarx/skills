@@ -11,7 +11,7 @@
 //     <boards folder>/<slugFor(name)>.tldr. `live` is the lock when a server holding it is running
 //     (pid alive and its port answers for this room), else null. Exit 0 when nothing live holds
 //     the board, 4 when a live server does, 2 on a bad argument or a board outside the repository
-//     and the boards folder (refused before anything is created).
+//     and the boards folder or in a folder that does not exist (refused before anything is created).
 
 import fs from 'node:fs';
 import http from 'node:http';
@@ -105,7 +105,11 @@ export function isWithin(dir, p) {
 
 /**
  * Why a canonical board path may not be a board, or null when it may: it must be a .tldr file
- * inside the repository or the boards folder. All three paths must already be canonical.
+ * inside the repository or the boards folder, and its folder must already exist, since a board the
+ * server could never save is refused rather than lost. The boards folder itself is the exception:
+ * `whiteboard.sh start` and the server create it. One rule for `locate`, `start`, the server's boot
+ * and `/board/open`, so each refuses before anything is created. All three paths must already be
+ * canonical.
  * @param {string} board
  * @param {string} repo
  * @param {string} home
@@ -114,6 +118,8 @@ export function isWithin(dir, p) {
 export function placementRefusal(board, repo, home) {
   if (path.extname(board).toLowerCase() !== '.tldr') return `not a board: ${board} (a board is a .tldr file)`;
   if (!isWithin(repo, board) && !isWithin(home, board)) return `outside the repository: ${board}`;
+  const folder = path.dirname(board);
+  if (folder !== home && !fs.existsSync(folder)) return `its folder does not exist: ${folder}`;
   return null;
 }
 
@@ -169,10 +175,11 @@ export function pidAlive(pid) {
 }
 
 /**
- * Whether a whiteboard server on `port` answers and is hosting `room`. Never throws. It sends no
- * Origin and no Sec-Fetch-* header, so the bridge's client check lets it through. A 403 means
- * something answered and refused: it counts as live but unverified, never as "not live", so a
- * refused probe can never make a live server's lock read as stale.
+ * Whether a whiteboard server on `port` answers and is hosting `room`: only a 200 naming the room
+ * counts. Never throws. The bridge's client check cannot refuse it, since it addresses
+ * 127.0.0.1:<port> and sends no Origin and no Sec-Fetch-* header. So any other answer, a 403
+ * included, comes from something that is not this board's server (a reused pid's port), and the
+ * lock reads as stale.
  * @param {number} port
  * @param {string} room
  * @returns {Promise<boolean>}
@@ -180,7 +187,6 @@ export function pidAlive(pid) {
 export function probeCanvasStatus(port, room) {
   return new Promise((resolve) => {
     const req = http.get({ host: '127.0.0.1', port, path: '/canvas-status', timeout: 1000 }, (res) => {
-      if (res.statusCode === 403) { res.resume(); resolve(true); return; }
       if (res.statusCode !== 200) { res.resume(); resolve(false); return; }
       let raw = '';
       res.on('data', (c) => (raw += c));

@@ -19,11 +19,14 @@
 # board" uses. `locate` prints {board, name, room, lock, messages, png, log, live} as JSON, where
 # `live` is the lock of a running server that holds the board, else null.
 #
-# `start` refuses a board outside the repository and the boards folder before it creates anything,
-# then creates the boards folder and appends all further output to the board's log. It refuses a
-# board a live server already holds; attach to that server instead. `start --detach` starts the
-# server in the background, detached from the caller, waits until it is live, and prints the
-# board's `locate` JSON; on a failure it prints the end of the board's log.
+# `start` refuses a board outside the repository and the boards folder, or in a folder that does not
+# exist, before it creates anything, then creates the boards folder and appends all further output
+# to the board's log. It refuses a board a live server already holds; attach to that server
+# instead. `start --detach` starts the server in a new session of its own (through Node, which
+# calls setsid), so no signal to the caller's process group or terminal reaches it; it waits until
+# the board is live and prints the board's `locate` JSON. When another server took the board first,
+# it waits for that one and prints its JSON (the caller is then a guest). On a failure it prints the
+# end of the board's log.
 #
 # Runtime location, in order of preference:
 #   1. this skill's own folder (app/ and server/), when it is writable;
@@ -37,7 +40,8 @@
 #   0  installed (status, path); installed (install); located (locate, live or not); the board is
 #      live (start --detach, its locate JSON on stdout); the server exited cleanly (start)
 #   1  a precondition failed (Node.js or npm missing or too old), the server could not load the
-#      board, or a detached server did not come up (the end of its log is on stderr)
+#      board, or a detached server did not come up (the end of its log is on stderr); after a
+#      timeout it may still come up, so run `locate` again before starting another
 #   2  a bad argument, or a board that is not a .tldr file inside the repository or the boards
 #      folder, or whose folder does not exist (refused before anything is created)
 #   3  not installed (status prints what install would run; start refuses)
@@ -115,7 +119,8 @@ need_node() {
 }
 
 # The board's identity as JSON (boards.mjs). Exit 0, 4 when a live server holds it, or 2 when it
-# is not a board inside the repository or the boards folder. Creates nothing.
+# is not a board inside the repository or the boards folder, or its folder does not exist. Creates
+# nothing.
 locate_board() {
   if [ -n "$board" ]; then
     node "$SKILL_DIR/server/boards.mjs" --board "$board" --home "$BOARDS_DIR" --repo "$repo"
@@ -126,6 +131,27 @@ locate_board() {
 
 json_field() { # json_field <json> <field>
   node -e 'process.stdout.write(String(JSON.parse(process.argv[1])[process.argv[2]] ?? ""))' "$1" "$2"
+}
+
+# Succeeds when the lock file names a server that is still starting: its pid is alive and it has
+# not listened yet (port 0).
+lock_starting() { # lock_starting <lock file>
+  node -e '
+    let lock;
+    try { lock = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); } catch { process.exit(1); }
+    if (!lock || lock.port !== 0 || typeof lock.pid !== "number") process.exit(1);
+    try { process.kill(lock.pid, 0); } catch (e) { process.exit(e.code === "EPERM" ? 0 : 1); }' "$1"
+}
+
+# Start a command in a new session of its own and print its pid. Node's detached spawn calls
+# setsid(), so no signal to the caller's process group (a harness reaping its tool call) and no
+# hangup of the caller's terminal reaches it; `setsid(1)` is not on macOS, and Node is already
+# required. Every stream is away from the caller's, so the caller's own command returns.
+spawn_detached() { # spawn_detached <command> [args...]
+  node -e '
+    const c = require("child_process").spawn(process.argv[1], process.argv.slice(2), { detached: true, stdio: "ignore" });
+    c.on("error", (e) => { console.error(`whiteboard.sh: could not start ${process.argv[1]}: ${e.message}`); process.exit(1); });
+    if (c.pid) { process.stdout.write(String(c.pid)); c.unref(); }' "$@"
 }
 
 sources_hash() { # one hash over a runtime's app/ and server/ sources, build output and deps excluded
@@ -264,7 +290,8 @@ case "$cmd" in
   start)
     need_board
     need_node
-    # 1. Refuse a board outside the repository (exit 2) or one already live (exit 4), creating nothing.
+    # 1. Refuse a board outside the repository or in a folder that does not exist (exit 2), or one
+    #    already live (exit 4), creating nothing. Every exit 2 is decided here.
     where="$(locate_board)" && rc=0 || rc=$?
     if [ "$rc" -eq 4 ]; then
       echo "whiteboard.sh: this board is already live; attach to it instead of starting another server:" >&2
@@ -279,30 +306,35 @@ case "$cmd" in
     if [ "$detach" -eq 1 ]; then
       # 3. The runtime check, said in the log and to the caller.
       current_install >/dev/null || { echo "$NOT_INSTALLED" | tee -a "$log" >&2; exit 3; }
-      # 4. The server, in the background with every stream away from the caller's, so it outlives
-      #    the caller and the caller's own command returns. It appends to the board's log itself.
-      nohup bash "$SCRIPT_DIR/whiteboard.sh" start --board "$board" --repo "$repo" --scratch "$scratch" \
-        </dev/null >/dev/null 2>&1 &
-      child=$!
-      # 5. Wait until the board is live, then print its locate JSON.
+      # 4. The server, in a new session of its own, so it outlives the caller and whatever reaps the
+      #    caller's process group. It appends to the board's log itself.
+      child="$(spawn_detached bash "$SCRIPT_DIR/whiteboard.sh" start --board "$board" --repo "$repo" --scratch "$scratch")" \
+        && [ -n "$child" ] || exit 1
+      lock="$(json_field "$where" lock)"
+      # 5. Wait until the board is live, then print its locate JSON. The server is not this shell's
+      #    child, so its exit code cannot be read; every exit 2 and 3 was decided above. A server
+      #    that ends before the board is live either lost the race to another server, which then
+      #    holds the lock while it starts (wait for it, and print its JSON), or failed. The lock is
+      #    read before `locate`, so a rival that goes live in between is still seen live.
       deadline=$((SECONDS + DETACH_WAIT_S))
       while [ "$SECONDS" -lt "$deadline" ]; do
+        gone=0; starting=0
+        if ! kill -0 "$child" 2>/dev/null; then
+          gone=1
+          lock_starting "$lock" && starting=1
+        fi
         where="$(locate_board)" && rc=0 || rc=$?
         if [ "$rc" -eq 4 ]; then echo "$where"; exit 0; fi
-        if [ -n "$child" ] && ! kill -0 "$child" 2>/dev/null; then
-          code=0; wait "$child" || code=$?
-          child=""
-          # Exit 4: another server took the board first. Wait for it to come up and attach.
-          if [ "$code" -ne 4 ]; then
-            echo "whiteboard.sh: the server exited (code $code) before it was live. The end of $log:" >&2
-            tail -n 20 "$log" >&2 || true
-            [ "$code" -ne 0 ] && exit "$code"
-            exit 1
-          fi
+        [ "$rc" -eq 0 ] || exit "$rc"
+        if [ "$gone" -eq 1 ] && [ "$starting" -eq 0 ]; then
+          echo "whiteboard.sh: the server exited before the board was live. The end of $log:" >&2
+          tail -n 20 "$log" >&2 || true
+          exit 1
         fi
         sleep 0.5
       done
-      echo "whiteboard.sh: the server was not live after ${DETACH_WAIT_S}s. The end of $log:" >&2
+      echo "whiteboard.sh: the board was not live after ${DETACH_WAIT_S}s. Its server may still come up:" >&2
+      echo "run whiteboard.sh locate again before starting another. The end of $log:" >&2
       tail -n 20 "$log" >&2 || true
       exit 1
     fi

@@ -145,17 +145,14 @@ const boardsByRoom = new Map<string, Board>();
 const joinable = (b: Board): Board => (boardsByRoom.set(b.room, b), b);
 
 // [B2/SF3] A path a request names: relative paths resolve against the repository; the file must
-// be a .tldr inside the repository or the boards folder (boards.mjs's rule), and its folder must
-// already exist, since a board the server could never save is refused rather than lost.
+// be a .tldr inside the repository or the boards folder, in a folder that already exists, since a
+// board the server could never save is refused rather than lost (boards.mjs's placement rule).
 type BoardPathResult = { ok: true; board: Board } | { ok: false; status: number; error: string };
 function boardFromRequest(raw: unknown): BoardPathResult {
   if (typeof raw !== 'string' || !raw) return { ok: false, status: 400, error: 'a board path is required' };
   const board = boardAt(path.resolve(REPO_ROOT, raw));
   const refusal = placementRefusal(board.path, REPO_ROOT, HOME);
-  if (refusal) return { ok: false, status: refusal.startsWith('not a board') ? 400 : 403, error: refusal };
-  if (!fs.existsSync(path.dirname(board.path))) {
-    return { ok: false, status: 400, error: `its folder does not exist: ${path.dirname(board.path)}` };
-  }
+  if (refusal) return { ok: false, status: refusal.startsWith('outside') ? 403 : 400, error: refusal };
   return { ok: true, board };
 }
 
@@ -263,7 +260,6 @@ function getOrCreateRoom(roomId: string): RoomEntry {
 
   const board = boardsByRoom.get(roomId);
   if (!board) throw new BoardLoadError(`unknown room '${roomId}'`);
-  sweepCrashTemps(board.path);
   const initialSnapshot = readBoardSnapshot(board.path);
 
   const entry: RoomEntry = { room: null as unknown as TLSocketRoom, boardPath: board.path, dirty: false, inflight: null };
@@ -284,6 +280,7 @@ function getOrCreateRoom(roomId: string): RoomEntry {
   entry.dirty = false; // loading (and any migration it ran) is not an edit
 
   rooms.set(roomId, entry);
+  sweepCrashTemps(board.path);
   console.log(`[sync] room '${roomId}' ready (loaded=${!!initialSnapshot}) -> ${board.path}`);
   return entry;
 }
@@ -294,11 +291,14 @@ let tempSeq = 0;
 const tempPathFor = (target: string): string =>
   path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.${++tempSeq}.tmp`);
 
-// A write removes its own temp file when it fails, so only a crash leaves one. Loading a board
-// removes this board's temp files whose writer is gone, keeping the board's folder free of anything
-// but the board itself.
+// A write removes its own temp file when it fails, so only a crash leaves one. Once a board has
+// loaded, this removes the temp files tempPathFor named for it whose writer is gone, keeping the
+// board's folder free of anything but the board itself. Only that exact name matches, so a file of
+// the user's that merely starts with the board's name is never touched, and a temp file whose
+// writer still runs is that writer's write in flight.
+const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function sweepCrashTemps(boardPath: string): void {
-  const prefix = `.${path.basename(boardPath)}.`;
+  const crashTemp = new RegExp(`^\\.${escapeRegExp(path.basename(boardPath))}\\.(\\d+)\\.(\\d+)\\.tmp$`);
   let names: string[] = [];
   try {
     names = fs.readdirSync(path.dirname(boardPath));
@@ -306,9 +306,10 @@ function sweepCrashTemps(boardPath: string): void {
     return;
   }
   for (const name of names) {
-    if (!name.startsWith(prefix) || !name.endsWith('.tmp')) continue;
-    const pid = Number(name.slice(prefix.length).split('.')[0]);
-    if (Number.isInteger(pid) && pid > 0 && pid !== process.pid && pidAlive(pid)) continue;
+    const match = crashTemp.exec(name);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    if (pid !== process.pid && pidAlive(pid)) continue;
     fs.rmSync(path.join(path.dirname(boardPath), name), { force: true });
     console.log(`[sync] removed a temp file a crashed write left: ${name}`);
   }
@@ -343,16 +344,19 @@ async function persistRoom(roomId: string, entry: RoomEntry): Promise<void> {
   }
 }
 
-function persistRoomSync(roomId: string, entry: RoomEntry): void {
+// True when the board's file now holds the room.
+function persistRoomSync(roomId: string, entry: RoomEntry): boolean {
   const tmp = tempPathFor(entry.boardPath);
   try {
     fs.writeFileSync(tmp, JSON.stringify(entry.room.getCurrentSnapshot()));
     fs.renameSync(tmp, entry.boardPath);
     entry.dirty = false;
     console.log(`[sync] flushed room '${roomId}' -> ${entry.boardPath}`);
+    return true;
   } catch (e) {
     fs.rmSync(tmp, { force: true });
     notePersistResult(roomId, entry, e as Error);
+    return false;
   }
 }
 
@@ -610,14 +614,18 @@ type FrameFromApp =
 // /next-instruction changes state. So every request and upgrade passes three checks:
 //   1. Host names this server (127.0.0.1:<port> or localhost:<port>), which stops DNS rebinding.
 //   2. Sec-Fetch-Site, when present, is same-origin (the app's own requests) or none (a typed URL,
-//      a bookmark, the render-canvas's page.goto). Browsers send it on every request; a page on
-//      any other origin sends cross-site, or same-site from another port of 127.0.0.1 or
-//      localhost, and is refused. Non-browser clients (curl, poll.sh, the liveness probe,
-//      presence, the tests) send none.
+//      a bookmark, the render-canvas's page.goto). A browser that implements Fetch Metadata sends
+//      it on every request; a page on any other origin sends cross-site, or same-site from another
+//      port of 127.0.0.1 or localhost, and is refused. Older browsers (before Safari 16.4 or
+//      Firefox 90) send none, and are treated like curl: on them a foreign page's no-cors GET is
+//      not refused. Non-browser clients (curl, poll.sh, the liveness probe, presence, the tests)
+//      send none.
 //   3. Origin, when present, is this server's own page. A WebSocket handshake always carries one.
 // The app's static files are the one exception to 2 and 3: they are served after the Host check
 // and before the rest (below), so a link to a board from anywhere still loads the app, whose own
-// requests are then same-origin. Every API route and socket sits behind all three.
+// requests are then same-origin. Every API route and socket sits behind all three. No response may
+// be framed (X-Frame-Options and CSP frame-ancestors), so a foreign page cannot load the app in a
+// hidden <iframe>, where its requests would be same-origin and its /events socket a phantom human.
 const ownHosts = (): string[] => [`127.0.0.1:${assignedPort}`, `localhost:${assignedPort}`];
 function hostRefusal(headers: http.IncomingHttpHeaders): string | null {
   const host = (headers.host ?? '').toLowerCase();
@@ -651,6 +659,11 @@ function refuseWith(check: (h: http.IncomingHttpHeaders) => string | null) {
 
 const app = express();
 app.use(refuseWith(hostRefusal));
+app.use((_req: Request, res: Response, next: () => void) => {
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+  next();
+});
 // GET and HEAD only; a miss falls through to the full check, so no API path is served from here.
 app.use(express.static(APP_DIST));
 app.use(refuseWith(clientRefusal));
@@ -2473,35 +2486,62 @@ app.get('/snapshot', async (req: Request, res: Response) => {
 // The room this process leaves on a switch is evicted, not kept: flushed if it changed, its peers
 // disconnected, and no longer joinable. Its lock is released afterwards, so a process never gives
 // up the lock of a room it still serves (another server may boot that board the moment it is gone).
-async function evictRoom(roomId: string): Promise<void> {
+// A room whose flush fails is not evicted: it stays served, joinable and locked, and this returns
+// false, since closing it would lose every edit since its last save.
+async function evictRoom(roomId: string): Promise<boolean> {
   const entry = rooms.get(roomId);
+  const board = boardsByRoom.get(roomId);
   rooms.delete(roomId); // first, so the persist timer starts no further write
   boardsByRoom.delete(roomId);
   if (entry) {
     if (entry.inflight) await entry.inflight;
-    if (entry.dirty) persistRoomSync(roomId, entry);
+    if (entry.dirty && !persistRoomSync(roomId, entry)) {
+      rooms.set(roomId, entry);
+      if (board) boardsByRoom.set(roomId, board);
+      console.warn(`[sync] room '${roomId}' kept: its flush failed, so it is not evicted`);
+      return false;
+    }
     entry.room.close();
   }
   removeLock(roomId);
   console.log(`[sync] room '${roomId}' evicted: flushed, its peers disconnected, its lock released`);
+  return true;
 }
+
+// A switch refused because the room being left could not be saved.
+class BoardSwitchError extends Error {}
 
 // Moves this process onto `board`, whose lock the caller has claimed. Loads the target room BEFORE
 // anything switches, so a board that cannot be loaded leaves this process exactly as it was
-// (throws BoardLoadError).
+// (throws BoardLoadError). When the room being left cannot be flushed, the switch is undone and
+// that room stays where it was (throws BoardSwitchError).
 async function switchRoom(board: Board): Promise<void> {
   joinable(board);
+  const wasLoaded = rooms.has(board.room);
   try {
     getOrCreateRoom(board.room);
   } catch (e) {
     if (board.room !== activeRoomId) boardsByRoom.delete(board.room);
     throw e;
   }
-  const prevRoom = activeRoomId;
+  const prev = { room: activeRoomId, path: activeBoardPath, image: latestImagePath };
   activeRoomId = board.room;
   activeBoardPath = board.path;
   latestImagePath = pngPathFor(board.room);
-  if (prevRoom !== board.room) await evictRoom(prevRoom);
+  if (prev.room !== board.room && !(await evictRoom(prev.room))) {
+    activeRoomId = prev.room;
+    activeBoardPath = prev.path;
+    latestImagePath = prev.image;
+    const target = rooms.get(board.room);
+    if (target && !wasLoaded) {
+      rooms.delete(board.room);
+      target.room.close();
+    }
+    boardsByRoom.delete(board.room);
+    const why = `${prev.path} could not be saved, so it stays open here and ${board.path} was not opened`;
+    postSystemMessage(`Switching boards was refused: ${why}. Export it from the menu, or fix what stops the save, then switch again.`);
+    throw new BoardSwitchError(why);
+  }
   presence.switchRoom(board.room); // rebuild agent cursors against the new room
   await navigateRenderCanvas(board.room);
 }
@@ -2525,6 +2565,11 @@ async function openBoard(board: Board, res: Response, verb: string): Promise<voi
     await switchRoom(board);
   } catch (e) {
     if (board.room !== activeRoomId) removeLock(board.room);
+    if (e instanceof BoardSwitchError) {
+      console.warn(`[bridge] board ${verb} refused: ${e.message}`);
+      res.status(503).json({ error: e.message, ...reply });
+      return;
+    }
     if (!(e instanceof BoardLoadError)) throw e;
     console.warn(`[bridge] board ${verb} refused: ${e.message}`);
     res.status(422).json({ error: e.message, ...reply });
@@ -3063,7 +3108,8 @@ process.on('uncaughtException', (e) => {
 // Boot (the app's static files are mounted with the client checks, above)
 // ===========================================================================
 // [SF3/B2] Refuse to boot onto a board this process must not host: one outside the repository or
-// in a folder that does not exist (exit 2), one another server holds or is starting on (its lock is
+// in a folder that does not exist (exit 2, boards.mjs's placement rule, which `whiteboard.sh start`
+// has already applied before it spawned this process), one another server holds or is starting on (its lock is
 // never stolen; exit 4), or one whose file cannot be loaded (it is never overwritten; exit 1). The
 // lock is claimed exclusively before `listen`, so of two servers started at once on one board
 // exactly one boots; a refusal after the claim releases it.
@@ -3075,7 +3121,6 @@ async function refuseBoot(): Promise<void> {
   };
   const placement = placementRefusal(activeBoardPath, REPO_ROOT, HOME);
   if (placement) refuse(2, placement);
-  if (!fs.existsSync(path.dirname(activeBoardPath))) refuse(2, `its folder does not exist: ${path.dirname(activeBoardPath)}`);
   const owner = await claimBoardLock(bootBoard);
   if (owner?.port) refuse(4, `${activeBoardPath} is already live on port ${owner.port} (pid ${owner.pid}); attach to it instead`);
   if (owner) refuse(4, `${activeBoardPath} is being started by another server (pid ${owner.pid}); attach to it once it is live`);
