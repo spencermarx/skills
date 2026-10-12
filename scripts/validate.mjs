@@ -51,8 +51,9 @@ const SKILL_REFS = [
 const INVENTED_SKILLS = new Set(["make-chart"]);
 
 // A description is the one text every harness reads before choosing a skill, so there
-// every backticked kebab-case token must be a skill. These are the CLI and script names
-// a description may mention instead; add one here only when it is not a skill name.
+// every backticked kebab-case token must be a skill. These are the other tokens a
+// description may mention: the `gh` CLI, and `check`, `setup-aclarify-skills`' argument.
+// Add one here only when it is not a skill name.
 const DESCRIPTION_NON_SKILLS = new Set(["check", "gh"]);
 
 // The canonical route for loading a skill: "(through your skill tool, `/x`, or by
@@ -60,13 +61,16 @@ const DESCRIPTION_NON_SKILLS = new Set(["check", "gh"]);
 // one the sentence loads. `[\s>]` lets the phrase wrap, inside a blockquote too.
 const TYPED_ROUTE = /\((?:each[\s>]+)?through[\s>]+your[\s>]+skill[\s>]+tool,[\s>]+((?:`\/[^`\s]+`(?:[\s>]+and[\s>]+)?)+),?[\s>]+or[\s>]+by[\s>]+reading/g;
 const PLACEHOLDER_ROUTE = /^<[a-z-]+>$/;
+// Where a sentence ends, for the typed-route check: `.`, `!` or `?` and whitespace, or a
+// line that opens a list item (`-`, `*`, `1.`).
+const SENTENCE_END = /[.!?][\s>]+|\n[ \t>]*(?:[-*]|\d+[.)])[ \t]+/g;
 const KEBAB_TOKEN = /`([a-z0-9]+(?:-[a-z0-9]+)*)`/g;
 
 // Credits are two keys, so one string cannot mix them. `credits` names a source whose
 // text was copied or adapted: it needs the source's URL and that URL's NOTICE section.
 // `ideas` names a book, a method, or a skill read but not adapted: no NOTICE section.
 const IDEAS_PREFIX = /^Ideas from /;
-const ADAPTED_WORDS = /\b(adapted|copied)\b/i;
+const ADAPTED_WORDS = /\b(adapted|copied|paraphrased|ported|derived)\b/i;
 const URL = /https?:\/\/[^\s),;]+/g;
 
 // The source URLs NOTICE carries a licence section for: each section's header line
@@ -144,7 +148,7 @@ for (const dir of targets) {
   if (typeof fm.description === "string") {
     for (const [, n] of fm.description.matchAll(KEBAB_TOKEN)) {
       if (!allSkills.has(n) && !DESCRIPTION_NON_SKILLS.has(n)) {
-        fail(file, `description names \`${n}\`, which is not a skill in this catalog; fix the route, or, if \`${n}\` is a CLI or file and not a skill, add it to DESCRIPTION_NON_SKILLS in scripts/validate.mjs`);
+        fail(file, `description names \`${n}\`, which is not a skill in this catalog; fix the route, or, if \`${n}\` is a CLI, an argument or a file and not a skill, add it to DESCRIPTION_NON_SKILLS in scripts/validate.mjs`);
       }
     }
   }
@@ -211,26 +215,31 @@ for (const dir of targets) {
     for (const u of urls) if (!licensed.has(u)) fail(file, `metadata.credits names ${u}, but NOTICE has no section whose header ends with that URL; add the source's licence there, or, if no text was adapted from it, move the credit to metadata.ideas`);
   }
   if (typeof md.ideas === "string" && ADAPTED_WORDS.test(md.ideas)) {
-    fail(file, "metadata.ideas says text was adapted or copied; that part of the credit goes in metadata.credits, with the source's URL and a NOTICE section");
+    fail(file, "metadata.ideas says text was adapted, copied, paraphrased, ported or derived; that part of the credit goes in metadata.credits, with the source's URL and a NOTICE section");
   }
 }
 
 // "(through your skill tool, `/x`, or by reading its SKILL.md)": each typed `/x` must be
-// a skill, and one the sentence names in backticks before the parenthesis. A sentence
-// that names none ("load it") is read with the rest of its paragraph. `/<name>` is a
+// a skill, and the one the sentence loads: the nearest skill named in backticks before
+// the parenthesis (with k typed routes, one of the nearest k), within its sentence
+// (SENTENCE_END), so a name in an earlier list item or sentence, or one the sentence
+// sets aside before naming the skill it loads, never vouches for the route. A sentence that
+// names no skill ("load it") is read with the rest of its paragraph. `/<name>` is a
 // placeholder for a list given around it, and is left alone.
 function checkTypedRoute(whole, m, at) {
   const after = (text, re) => text.slice(Math.max(0, ...[...text.matchAll(re)].map((s) => s.index + s[0].length)));
   const paragraph = after(whole.slice(0, m.index), /\n[ \t>]*\n/g);
-  const sentence = after(paragraph, /[.!?][\s>]+/g);
-  const named = (text) => [...text.matchAll(KEBAB_TOKEN)].map((t) => t[1]);
-  const names = named(sentence).length ? named(sentence) : named(paragraph);
-  for (const [, typed] of m[1].matchAll(/`\/([^`]+)`/g)) {
+  const sentence = after(paragraph, SENTENCE_END);
+  const named = (text) => [...text.matchAll(KEBAB_TOKEN)].map((t) => t[1]).filter((n) => allSkills.has(n) || INVENTED_SKILLS.has(n));
+  const typedAll = [...m[1].matchAll(/`\/([^`]+)`/g)].map((t) => t[1]);
+  const inScope = named(sentence).length ? named(sentence) : named(paragraph);
+  const nearest = inScope.slice(-typedAll.length);
+  for (const typed of typedAll) {
     if (PLACEHOLDER_ROUTE.test(typed)) continue;
     if (!allSkills.has(typed) && !INVENTED_SKILLS.has(typed)) {
       fail(at, `the typed route \`/${typed}\` names no skill in this catalog; a user typing it reaches nothing, or a harness built-in. Use the loaded skill's name`);
-    } else if (!names.includes(typed)) {
-      fail(at, `the typed route \`/${typed}\` does not match the skill this sentence loads (${names.length ? names.map((n) => `\`${n}\``).join(", ") : "none named in backticks"}); the route and the name must agree`);
+    } else if (!nearest.includes(typed)) {
+      fail(at, `the typed route \`/${typed}\` does not match the skill this sentence loads (${nearest.length ? nearest.map((n) => `\`${n}\``).join(", ") : "none named in backticks"}, the nearest skill named before it); the route and the name must agree`);
     }
   }
 }

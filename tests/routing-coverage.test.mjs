@@ -11,8 +11,20 @@ import { parse } from "yaml";
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
 const casesDir = join(repo, "evals", "cases");
 
-// Promoted before the rule was enforced and still without a case. Remove a name when
-// its case lands; nothing may be added here.
+// Promoted before the rule was enforced. Frozen: the grandfather list may only ever
+// hold these seven, so growing it means editing this literal, in plain view of review.
+const ORIGINAL_GRANDFATHERED = Object.freeze([
+  "atomic-commits",
+  "clean-comments",
+  "write-comments",
+  "teach",
+  "to-questionnaire",
+  "grill-with-docs",
+  "setup-aclarify-skills",
+]);
+
+// The ones still without a case. Remove a name when its case lands; a name not in
+// ORIGINAL_GRANDFATHERED fails the test below.
 const GRANDFATHERED = new Set([
   "atomic-commits",
   "clean-comments",
@@ -40,4 +52,9 @@ test("every promoted skill has a skill-used routing case", () => {
 test("the grandfather list names only promoted skills that still lack a case", () => {
   const stale = [...GRANDFATHERED].filter((n) => !promoted.includes(n) || covered.has(n));
   assert.deepEqual(stale, [], `remove from GRANDFATHERED in tests/routing-coverage.test.mjs: ${stale.join(", ")}`);
+});
+
+test("the grandfather list only shrinks: every name is one of the original seven", () => {
+  const added = [...GRANDFATHERED].filter((n) => !ORIGINAL_GRANDFATHERED.includes(n));
+  assert.deepEqual(added, [], `GRANDFATHERED may not grow; add a skill-used case in evals/cases/ for: ${added.join(", ")}`);
 });

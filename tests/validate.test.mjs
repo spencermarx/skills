@@ -58,6 +58,14 @@ test("rejects: adapted text credited under metadata.ideas", () => {
   assert.match(r.out, /goes in metadata\.credits/);
 });
 
+test("rejects: paraphrased or ported text credited under metadata.ideas", () => {
+  for (const word of ["Paraphrased", "Ported", "Derived"]) {
+    const r = validate({ probe: skill("probe", { meta: `  ideas: "${word} from Acme's acme-skill, ${SRC}"\n` }) });
+    assert.ok(!r.ok, `"${word} from" under ideas was accepted`);
+    assert.match(r.out, /goes in metadata\.credits/);
+  }
+});
+
 test("accepts an ideas key with a URL and no NOTICE section", () => {
   const r = validate({ probe: skill("probe", { meta: `  ideas: "Acme's acme-skill (${SRC}), read but not vendored"\n` }) });
   assert.ok(r.ok, r.out);
@@ -102,6 +110,10 @@ test("accepts a typed route matching its sentence, a wrapped blockquote, a list 
     "Then `helper`. Load each by name (through your skill tool, `/<name>`, or by reading its SKILL.md).",
     "",
     "If `helper` is installed, use it. Load it (through your skill tool, `/helper`, or by reading its SKILL.md).",
+    "",
+    "- **Copy.** Load the `probe` skill (through your skill tool,",
+    "  `/probe`, or by reading its SKILL.md)",
+    "- **Creative.** Load the `helper` skill (through your skill tool, `/helper`, or by reading its SKILL.md)",
   ].join("\n");
   const r = validate({ helper, probe: skill("probe", { body }) });
   assert.ok(r.ok, r.out);
@@ -116,7 +128,21 @@ test("rejects: a typed route that names no skill (round 1's `/context` defect)",
 test("rejects: a typed route naming a real skill other than the sentence's", () => {
   const r = validate({ helper, probe: skill("probe", { body: load("helper", "probe") }) });
   assert.ok(!r.ok, "a mismatched typed route was accepted");
-  assert.match(r.out, /the typed route `\/probe` does not match the skill this sentence loads \(`helper`\)/);
+  assert.match(r.out, /the typed route `\/probe` does not match the skill this sentence loads \(`helper`, the nearest/);
+});
+
+test("rejects: a typed route vouched for only by an earlier list item with no full stop", () => {
+  const body = "- Draft with `helper`\n- Load the `probe` skill (through your skill tool, `/helper`, or by reading its SKILL.md)";
+  const r = validate({ helper, probe: skill("probe", { body }) });
+  assert.ok(!r.ok, "a route matched by the previous list item was accepted");
+  assert.match(r.out, /the typed route `\/helper` does not match the skill this sentence loads \(`probe`/);
+});
+
+test("rejects: a typed route naming the skill a contrastive sentence sets aside", () => {
+  const body = "Do not load `probe` here; load the `helper` skill (through your skill tool, `/probe`, or by reading its SKILL.md).";
+  const r = validate({ helper, probe: skill("probe", { body }) });
+  assert.ok(!r.ok, "a route naming the set-aside skill was accepted");
+  assert.match(r.out, /the typed route `\/probe` does not match the skill this sentence loads \(`helper`/);
 });
 
 // Incubation.

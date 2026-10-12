@@ -164,8 +164,9 @@ the revised brief is accepted, name the two reviews still owed before launch:
   copy, passing the revised brief's audience and hook as the reader it is
   written for. If no copy is drafted yet, `draft-conversion-copy` writes it
   from the revised brief when that skill is installed.
-- **Creative.** Load the `brand-review` skill (same routes, `/brand-review`)
-  and run it on each finished visual asset.
+- **Creative.** Load the `brand-review` skill (through your skill tool,
+  `/brand-review`, or by reading its SKILL.md) and run it on each finished
+  visual asset.
 
 Run whichever the user asks for now; list the others as outstanding. If a skill
 is not installed, say so and name what it would have checked.

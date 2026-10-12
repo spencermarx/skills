@@ -33,11 +33,12 @@ Claude Code.
    allowed are `disable-model-invocation`, `user-invocable` and `argument-hint`,
    which other harnesses ignore. `description` is at most 1024 characters with
    the trigger first. Every backticked kebab-case name in a `description` is a
-   route to another skill, so it must be one (the CLI names `check` and `gh` are
-   the allowed exceptions). `metadata` values are strings, with one exception:
-   every skill under `skills/_incubating/` sets `internal: true`, a boolean,
-   which the `npx skills` installer reads as "install only when named with
-   `--skill`". No skill elsewhere may set it.
+   route to another skill, so it must be one (the `gh` CLI and `check`,
+   `setup-aclarify-skills`' argument, are the allowed exceptions). `metadata`
+   values are strings, with one exception: every skill under
+   `skills/_incubating/` sets `internal: true`, a boolean, which the
+   `npx skills` installer reads as "install only when named with `--skill`".
+   No skill elsewhere may set it.
 2. **User-invoked skills** (`disable-model-invocation: true`) also ship
    `agents/openai.yaml`, which is how Codex learns the same thing:
 
@@ -56,10 +57,14 @@ Claude Code.
    > Load the `scratchpad` skill (through your skill tool, `/scratchpad`, or by
    > reading its SKILL.md), then …
 
-   The typed route `/scratchpad` names the same skill as the sentence; `/<name>`
-   stands in only when the sentence loads each skill of a list. Say what to do
-   when it is not installed. Never write `Skill(...)`, a `plugin:` prefix, or a
-   `../other-skill/` path.
+   The typed route `/scratchpad` names the same skill as the sentence.
+   `npm run check` compares it with the nearest skill named in backticks before
+   the parenthesis, in the same sentence (a sentence ends at `.`, `!` or `?`, or
+   at a line opening a list item); with several typed routes, that many nearest
+   names. A sentence that names no skill ("load it") is read with its whole
+   paragraph. `/<name>` stands in only when the sentence loads each skill of a
+   list. Say what to do when it is not installed. Never write `Skill(...)`, a
+   `plugin:` prefix, or a `../other-skill/` path.
 5. **Bundled files.** Reference them relative to the skill's own folder, one
    level deep (`scripts/x.sh`, `references/y.md`), and say once near the top:
 
@@ -140,8 +145,8 @@ metadata:
 
 A skill that has both carries both keys; one string never mixes them.
 `npm run check` fails a `credits` value that names no URL, names a URL with no
-`NOTICE` section, or opens with `Ideas from `, and an `ideas` value that says
-text was adapted or copied.
+`NOTICE` section, or opens with `Ideas from `, and an `ideas` value that uses
+the word adapted, copied, paraphrased, ported or derived.
 
 ## Lifecycle
 
@@ -156,8 +161,9 @@ another repository) may enter a family directly, but it still carries routing
 cases in `evals/cases/`: a should-fire case and the near miss most likely to
 steal it. `npm run check` fails an `_incubating/` skill without `internal: true`,
 and `npm test` fails a promoted skill with no `skill-used` case, apart from a
-named list of older skills in `tests/routing-coverage.test.mjs` that is only
-allowed to shrink.
+named list of older skills in `tests/routing-coverage.test.mjs`. That list must
+be a subset of the seven names frozen there, and drop each name once its case
+lands, so it can only shrink unless someone visibly edits the frozen set.
 
 A retired skill is deleted; its changeset names the replacement. A skill that
 does not meet `SCOPE.md` belongs in `.out-of-scope/` as a reasoned note, not in
