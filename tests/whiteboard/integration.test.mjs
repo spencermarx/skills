@@ -134,7 +134,10 @@ async function main() {
   for (const [b, port] of [[A, portA], [B, portB]]) {
     const lockPath = FILES[b].lock;
     ok(fs.existsSync(lockPath), `lockfile ${b}.lock written`);
-    const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    // The server prints its port as it listens and records it in the lock just after.
+    const readLockFile = () => JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    for (let i = 0; i < 40 && !readLockFile().port; i++) await sleep(50);
+    const lock = readLockFile();
     eq(lock.port, port, `${b}.lock port matches the bound port`);
     eq(lock.room, ROOM[b], `${b}.lock room is the room id derived from the board's path`);
     eq(lock.path, SB.board(b), `${b}.lock path is the board's canonical path`);
