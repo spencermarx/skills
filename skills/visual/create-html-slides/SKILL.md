@@ -62,9 +62,15 @@ numbered questions in plain text and stop until they reply.
 
 ### Step 1: load the brand
 
-Load the `get-brand-kit` skill (through your skill tool, `/get-brand-kit`, or by
-reading its SKILL.md). It says where this repository's brand kit lives. Read
-these parts of it and use the values exactly:
+Take the brand from the `Brand kit` folder named in `docs/agents/workspace.md`,
+through the `get-brand-kit` skill when it is installed, otherwise read directly
+using the file names `get-brand-kit` documents. When it is installed, load it
+(through your skill tool, `/get-brand-kit`, or by reading its SKILL.md): it finds
+the folder, or serves its own kit when none is set. This repository's agent
+configuration should have been provided to you (the `## Agent skills` block
+pointing at `docs/agents/`); if it is missing, suggest the user run the
+`setup-aclarify-skills` skill. Read these parts of the kit and use the values
+exactly:
 
 | Brand kit file | What you take from it |
 |---|---|
@@ -73,11 +79,14 @@ these parts of it and use the values exactly:
 | visual design system | background, card, badge, divider, data-mark and spacing rules |
 | logos | the path of each logo variant |
 
-If any file it serves is still marked `Status: placeholder`, build with it, and
+If any brand kit file you read is still marked `Status: placeholder`, build with it, and
 tell the user in your delivery message that the deck uses placeholder brand
 values, not theirs.
 
-**If `get-brand-kit` is not installed,** ask the user for their brand: the
+**If `get-brand-kit` is not installed** and a `Brand kit` folder is set, read
+those parts from the folder's `color-palette.md`, `typography.md`,
+`visual-design-system.md` and `logos.md`, whose logo paths are relative to the
+folder. **With no folder set either,** ask the user for their brand: the
 palette, the typefaces, and a logo file. If they have none to give, build with
 the fallback tokens already in `references/viewport-base.css`, use the deck title
 as plain text where the logo would go, and say in your delivery message that the

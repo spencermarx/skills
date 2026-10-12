@@ -38,7 +38,9 @@ default below and suggest the user run the `setup-aclarify-skills` skill.
    `**Brand kit:**` line naming a folder (for example `brand/` inside the
    conventions folder), read the brand from there and ignore this skill's own
    reference files. The folder uses the same file names as `references/` below,
-   and its `logos.md` gives logo paths relative to that folder.
+   and its `logos.md` gives logo paths relative to that folder. Those names are
+   also how `brand-review`, `design-expert` and `create-html-slides` read the
+   folder when this skill is not installed, so keep them.
 2. **Otherwise, this skill's own files** are the brand kit: `references/` and
    `assets/`. A user makes them theirs by forking or editing them in place.
 

@@ -9,8 +9,10 @@ Edit any line; the skills read this file each time.
   `write-comments`, `clean-comments` and the review skills follow the house rules
   they find there.
 - **Brand kit:** none. Set a folder (for example `docs/brand/`) holding your colours,
-  typography, logos, design system and voice, and `get-brand-kit`, `brand-review`,
-  `create-html-slides` and `design-expert` use it instead of the placeholder brand.
+  typography, logos, design system and voice, in the files `get-brand-kit`
+  documents, and `get-brand-kit`, `brand-review`, `create-html-slides` and
+  `design-expert` take the brand from it before any other source, whether or not
+  `get-brand-kit` is installed.
 - **Eval cases:** `.evals/cases/`. The routing cases `harness-eval` runs for this
   repository's own skills.
 - **Checks before commit:** none set. Skills that commit run what `AGENTS.md`

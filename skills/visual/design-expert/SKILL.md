@@ -44,13 +44,21 @@ options numbered in plain text and stop until they reply.
 ## Where the brand and design system come from
 
 Colors, type and spacing come from stated brand values and the product's own
-system, never from your own taste. In order:
+system, never from your own taste. This repository's agent configuration should
+have been provided to you (the `## Agent skills` block pointing at
+`docs/agents/`); if it is missing, suggest the user run the
+`setup-aclarify-skills` skill. In order:
 
-1. **`get-brand-kit`, when it is installed.** Load it (through your skill tool,
-   `/get-brand-kit`, or by reading its SKILL.md) and read the parts covering
-   color, typography and the visual system. Use its values exactly. If it says
-   its values are still a placeholder, tell the user the design was checked
-   against a placeholder, not their brand.
+1. **The `Brand kit` folder named in `docs/agents/workspace.md`**, through the
+   `get-brand-kit` skill when it is installed, otherwise read directly using the
+   file names `get-brand-kit` documents. When it is installed, load it (through
+   your skill tool, `/get-brand-kit`, or by reading its SKILL.md): it finds the
+   folder, or serves its own kit when none is set. Read the parts covering
+   color, typography and the visual system. When it is not installed and a
+   folder is set, read `color-palette.md`, `typography.md` and
+   `visual-design-system.md` from the folder. Use the values exactly. If a file
+   says `Status: placeholder`, tell the user the design was checked against a
+   placeholder, not their brand.
 2. **Otherwise, the repository's own design system**: its component library,
    theme and design tokens (CSS custom properties, a Tailwind config, a tokens
    file), found from the target's imports and the project's styling setup.
