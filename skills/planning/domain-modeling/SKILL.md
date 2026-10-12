@@ -1,6 +1,6 @@
 ---
 name: domain-modeling
-description: Build and sharpen a project's domain model while designing. Use when the user wants to pin down domain terminology or a ubiquitous language, write or edit the project glossary, notices a term being used two ways, or when a significant design decision surfaces that may deserve a record, and when another skill needs to maintain the domain model. Owns the judgment of which terms matter. Do NOT use merely to read the glossary for vocabulary, or to author the decision record itself (use `decision-record`).
+description: Build and sharpen a project's domain model while designing. Use when the user wants to pin down domain terminology or a ubiquitous language, uses a vague or overloaded word, notices a term being used two ways, says the code and the language disagree, or when a significant design decision surfaces that may deserve a record, and when another skill needs to maintain the domain model. Owns the judgment of which terms matter and whether the language is right. Do NOT use to scaffold, format or restructure the glossary file (use `context`), merely to read the glossary for vocabulary, or to author the decision record itself (use `decision-record`).
 metadata:
   credits: "Adapted from Matt Pocock's domain-modeling skill, https://github.com/mattpocock/skills (MIT)"
 ---
@@ -9,34 +9,26 @@ metadata:
 
 Actively build and sharpen the project's domain model as you design. This is the _active_ discipline: challenging terms, inventing edge-case scenarios, and writing the glossary down the moment a term crystallizes. (Merely _reading_ the glossary for vocabulary is not this skill: that is a one-line habit any skill can do. This skill is for when you are changing the model, not just consuming it.)
 
-Paths below are relative to this skill's directory; resolve them to absolute paths before reading.
-
 ## Where the model lives
 
 This repository's agent configuration should have been provided to you (the `## Agent skills` block pointing at `docs/agents/`). If it is missing, use the defaults below and suggest the user run the `setup-aclarify-skills` skill.
 
-`docs/agents/domain.md` names the glossary file, its layout, and the decision-record folder. Defaults:
+- **Glossary:** `docs/agents/domain.md` names the file and layout. Default: `GLOSSARY.md` at the repository root, or, when a root `GLOSSARY-MAP.md` exists, the per-context glossary it points at. A repository that already uses `CONTEXT.md` and `CONTEXT-MAP.md` keeps those names. When several contexts exist and the topic's context is unclear, ask.
+- **Decision records:** `docs/agents/domain.md` names the folder. Default: `docs/adr/`.
 
-```
-/
-├── GLOSSARY.md            ← single context (most repos)
-├── docs/adr/              ← decision records
-└── src/
-```
+Read the glossary before you challenge any term. If none exists, that is normal: it is created when the first term is resolved, never ahead of it.
 
-```
-/
-├── GLOSSARY-MAP.md        ← multiple contexts: indexes them, defines no terms
-├── docs/adr/              ← system-wide decisions
-└── src/
-    ├── ordering/
-    │   ├── GLOSSARY.md
-    │   └── docs/adr/      ← context-specific decisions
-    └── billing/
-        └── GLOSSARY.md
-```
+## Writing the glossary down
 
-If a map exists, read it to find the glossary for the context you are in; when the topic's context is unclear, ask. Create files lazily, only when you have something to write: scaffold the glossary when the first term is resolved, never ahead of it. The glossary's format, and how the single and multi-context layouts are told apart, are in [references/glossary-format.md](references/glossary-format.md). Read it before your first write.
+This skill decides what goes in the glossary; the `context` skill owns how it is written: the file's name and place, its sections, the map, and the links that must change with it. Before your first write in a session, load the `context` skill (through your skill tool, `/context`, or by reading its SKILL.md) and write through it.
+
+If `context` is not installed, write the entry yourself in the existing file's own shape. With no file yet, create the one the configuration names (default `GLOSSARY.md` at the root) with a `# {Context name}` heading, a one- or two-sentence description of the context, and a `## Language` section of entries: the term in bold followed by a colon, a one- or two-sentence definition of what it is, and an `_Avoid_:` line listing the synonyms it replaces. Never overwrite an existing glossary; edit it in place. Anything beyond that (relationships, open questions, a map for several contexts) is the `context` skill's, so suggest the user install it once a second context appears.
+
+## Which terms earn an entry
+
+- **Only terms specific to this domain.** General programming concepts (timeouts, error types, utility patterns) do not belong, however much the code uses them. Ask: is this unique to the domain, or a general programming concept? Only the former belongs.
+- **Only words the domain's people speak.** A term earns an entry because the people who work in this domain use it, not because it was convenient during one design session.
+- **Only what the thing is.** The glossary is devoid of implementation detail. It is not a spec, a scratch pad, or a store for implementation decisions; those go in code, docs, or a decision record.
 
 ## During the session
 
@@ -68,9 +60,7 @@ When the user states how something works, check whether the code agrees. If you 
 
 ### Update the glossary inline
 
-When a term is resolved, update the glossary right there. Don't batch these up: capture them as they happen. (Run from `grill-with-docs`, the order is different: that skill collects terms during the interview and writes them after, with the user's agreement.)
-
-The glossary should be totally devoid of implementation details. Do not treat it as a spec, a scratch pad, or a store for implementation decisions. It is a glossary and nothing else.
+When a term is resolved, update the glossary right there, as [Writing the glossary down](#writing-the-glossary-down) describes. Don't batch these up: capture them as they happen. (Run from `grill-with-docs`, the order is different: that skill collects terms during the interview and writes them after, with the user's agreement.)
 
 ### Surface decisions as they crystallize
 
