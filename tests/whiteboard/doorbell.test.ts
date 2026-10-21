@@ -1149,8 +1149,10 @@ async function guardSection() {
     // The board's own surfaces still work.
     eq((await rawRequest(port, { path: '/canvas-status', headers: { Host: `localhost:${port}` } })).status, 200, 'a localhost Host on this port is accepted');
     eq((await rawRequest(port, { method: 'POST', path: '/agent-message', headers: { Origin: own, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' }, body: '{"text":"hi"}' })).status, 200, 'a same-origin POST from the board app is accepted');
-    eq((await rawRequest(port, { path: '/', headers: { 'Sec-Fetch-Site': 'same-site', 'Sec-Fetch-Mode': 'navigate' } })).status, 200, 'a same-site top-level navigation (the board switcher) is accepted');
-    eq((await rawRequest(port, { path: '/', headers: { 'Sec-Fetch-Site': 'none', 'Sec-Fetch-Mode': 'navigate' } })).status, 200, 'a typed or opened URL (Sec-Fetch-Site none) is accepted');
+    // The guard runs before every route, so a route that answers without the app build stands in
+    // for `/`, which is a 404 where app/dist is not built (CI).
+    eq((await rawRequest(port, { path: '/canvas-status', headers: { 'Sec-Fetch-Site': 'same-site', 'Sec-Fetch-Mode': 'navigate' } })).status, 200, 'a same-site top-level navigation (the board switcher) is accepted');
+    eq((await rawRequest(port, { path: '/canvas-status', headers: { 'Sec-Fetch-Site': 'none', 'Sec-Fetch-Mode': 'navigate' } })).status, 200, 'a typed or opened URL (Sec-Fetch-Site none) is accepted');
     eq((await rawRequest(port, { path: `/pending?sessionId=${lead}` })).status, 200, 'curl (no Origin, no Sec-Fetch headers) is accepted');
 
     // WebSockets: the operator browser (own origin) connects; a foreign origin cannot.
