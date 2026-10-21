@@ -1883,6 +1883,15 @@ Claude Code's: its `409 no inbox socket…` stays, and the skill skips it in pul
 - *`GET /messages` checks the room id* (`isRoomId`, else `400`).
 - *Sends enter only by `POST /message`.* The WebSocket `{type:'message'}` path is removed, so every
   Send passes the Origin/Host guard's HTTP checks.
+- *A wait bounded by a recovery's time ends at that time by `Date.now()`.* Recovery measures its
+  deadline with `Date.now()`, and `setTimeout` counts on libuv's monotonic millisecond clock, which
+  floors on a different phase: a timer armed for `deadline - Date.now()` wakes with a millisecond still
+  left in about 2 of 100 runs. Recovery then read time left, began a reload with a millisecond, took
+  its unanswered probe for a clean store, and said "the canvas was reloaded" where it should have said
+  its time ran out (CI caught it as a flaky Q0). `wsRequest`, `delay` and `withTimeout` arm
+  `wallClockTimeout`, which re-arms a timer that wakes early, so a wait ends no earlier than its
+  `Date.now()` bound. `sync-corruption.test.ts` Board Q0e runs Q0 with every server timer 5 ms
+  early, which fails without the re-arm every time.
 
 **P6. Room ids are upstream's: the board's base name.** The earlier port named a room by a hash of
 the board's canonical path, so two `x.tldr` files in different folders were two rooms. This port

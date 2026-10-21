@@ -72,6 +72,9 @@
 //   - Board Q: a canvas no reload repairs, with no server-owned page to relaunch: the line says the
 //     board could not be repaired, with "tried 1 time" or "tried 2 times" after that many reloads, and
 //     with the recovery's time running out when none could begin (Q0, "tried 0 times" before this).
+//     Q0e is Q0 with every server timer waking before its Date.now() bound, as setTimeout can
+//     (sync-corruption.preload-early-timers.mjs): before the recovery's waits re-armed to Date.now(), a
+//     reload began with milliseconds left, its probe went unanswered, and the line said "reloaded".
 //   - Board L (the real render-canvas): a board holding 108 MiB of inline images, more than one
 //     websocket message to the bridge may carry, recovers a cut-off write; the harvest sends each asset's
 //     data as a digest and asks for whole only the assets the room does not hold the same.
@@ -168,10 +171,11 @@ const V = 'wbsync_v'; // an asset a peer deletes between the harvest's list and 
 const V2 = 'wbsync_v2'; // an asset the canvas removes between the list and its fetch keeps the room's copy
 const C = 'wbsync_c'; // a reloaded canvas that never shows the put-back is not reported recovered
 const Q0 = 'wbsync_q0'; // a canvas still corrupted and no reload begun: the line says the time ran out
+const Q0E = 'wbsync_q0e'; // Q0 with the server's timers waking early: still no reload begun
 const Q1 = 'wbsync_q1'; // a canvas still corrupted after one reload: "tried 1 time"
 const Q2 = 'wbsync_q2'; // a canvas still corrupted after two reloads: "tried 2 times"
 const US = 'wbsync_us'; // a switch away from a board whose change cannot be saved is refused
-const boards = [X, Y, Z, P, U, HV, D, G, M, K, N, N2, N3, E, E0, T, S, V, V2, C, Q0, Q1, Q2, US, R, R6, B, L, A];
+const boards = [X, Y, Z, P, U, HV, D, G, M, K, N, N2, N3, E, E0, T, S, V, V2, C, Q0, Q0E, Q1, Q2, US, R, R6, B, L, A];
 
 // --- browser-global shim (mirrors server/headless-shim.ts) BEFORE any tldraw client code --------
 const g = globalThis as unknown as {
@@ -1077,14 +1081,16 @@ async function boardC() {
 // two (n 2). Its sync-health reports the store corrupted after every reload. For n 0 the request for the
 // asset is never answered and the ws timeout is longer than the recovery's 30 s, so that request takes the
 // recovery's time; for n 1 it is answered so the first reload begins with about 950 ms of it left.
-async function boardQ(n: '0' | '1' | '2') {
-  const board = { 0: Q0, 1: Q1, 2: Q2 }[n];
-  const srv = boot(board, n === '2' ? {} : { WHITEBOARD_WS_TIMEOUT_MS: '40000' });
+// With `early`, the server's timers wake 5 ms early (sync-corruption.preload-early-timers.mjs).
+async function boardQ(n: '0' | '1' | '2', { early = false } = {}) {
+  const board = early ? Q0E : { 0: Q0, 1: Q1, 2: Q2 }[n];
+  const earlyTimers = early ? { NODE_OPTIONS: `--import=${new URL('./sync-corruption.preload-early-timers.mjs', import.meta.url).href}` } : {};
+  const srv = boot(board, n === '2' ? {} : { WHITEBOARD_WS_TIMEOUT_MS: '40000', ...earlyTimers });
   const port = await srv._port;
   const fake = new FakeCanvas(port, board, { corruptAfterReload: true, ...(n === '0' ? { assetFetch: 'silent' } : n === '1' ? { assetAnswerAt: 29050 } : {}) });
   try {
     await fake.connect();
-    console.log(`\n[Q${n} a canvas no reload repairs] port=${port}`);
+    console.log(`\n[Q${n}${early ? ' with timers that wake early' : ''} a canvas no reload repairs] port=${port}`);
     const fresh = { ...assetRecord('asset:q_new'), props: { ...assetRecord('asset:q_new').props, src: PIXEL2 } };
     const ans = await post(port, '/exec', { code: `editor.store.markAsPossiblyCorrupted(); editor.store.put([${JSON.stringify(fresh)}]); ${validCode('shape:q_box', 0)}` });
     const why = n === '0' ? "the recovery's time ran out before a reload could begin" : `tried ${n} time${n === '1' ? '' : 's'}`;
@@ -1602,6 +1608,7 @@ async function main() {
   await boardV('canvas');
   await boardC();
   await boardQ('0');
+  await boardQ('0', { early: true });
   await boardQ('1');
   await boardQ('2');
   await boardUS();

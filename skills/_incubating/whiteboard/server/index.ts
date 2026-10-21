@@ -1167,6 +1167,23 @@ class WsClosed extends Error {
   }
 }
 
+// A timer for `ms` that never fires before `ms` have passed by Date.now(). setTimeout counts on libuv's
+// monotonic millisecond clock, while every deadline here is a Date.now() time, and the two floor to the
+// millisecond on different phases: a timer armed for `deadline - Date.now()` can wake with Date.now() a
+// millisecond short of the deadline, in about 2 of 100 runs. A recovery then reads remainingMs(deadline)
+// as time left and begins a reload it has no time for, whose probe goes unanswered and is read as clean.
+// So a timer that wakes early re-arms for the rest; `rearm` receives each new handle, so whoever clears
+// the timer clears the live one.
+function wallClockTimeout(fn: () => void, ms: number, rearm: (timer: NodeJS.Timeout) => void = () => undefined): NodeJS.Timeout {
+  const end = Date.now() + ms;
+  const tick = (): void => {
+    const left = end - Date.now();
+    if (left > 0) rearm(setTimeout(tick, left));
+    else fn();
+  };
+  return setTimeout(tick, Math.max(0, ms));
+}
+
 function wsRequest<T>(type: WsRequestType, extra: Record<string, unknown> = {}, timeoutMs = WS_REQUEST_TIMEOUT_MS): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const socket = renderCanvasSocket;
@@ -1175,11 +1192,12 @@ function wsRequest<T>(type: WsRequestType, extra: Record<string, unknown> = {}, 
       return;
     }
     const id = randomUUID();
-    const timer = setTimeout(() => {
+    const entry: Pending = { resolve: resolve as (v: unknown) => void, reject, timer: undefined as unknown as NodeJS.Timeout, type, socket };
+    entry.timer = wallClockTimeout(() => {
       pending.delete(id);
       reject(new WsNoAnswer(`ws request '${type}' timed out`));
-    }, timeoutMs);
-    pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer, type, socket });
+    }, timeoutMs, (timer) => { entry.timer = timer; });
+    pending.set(id, entry);
     sendToRenderCanvas({ type, id, ...extra } as FrameToApp);
   });
 }
@@ -3521,7 +3539,7 @@ let canvasGen = 0;
 const canvasLogUrl = (roomId: string): string => `http://${HOST}:${assignedPort}/?role=agent&room=${encodeURIComponent(roomId)}`;
 const canvasUrl = (roomId: string): string => `${canvasLogUrl(roomId)}&canvasKey=${encodeURIComponent(CANVAS_KEY)}`;
 
-const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+const delay = (ms: number): Promise<void> => new Promise((r) => { wallClockTimeout(r, ms); });
 
 // [render-cap] Every wait on a Chromium is bounded: Playwright gives evaluate and newPage no timeout,
 // and a renderer that stops answering would hold its caller for good. A call that runs out rejects
@@ -3535,7 +3553,7 @@ class CanvasSuperseded extends Error {}
 function withTimeout<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const expired = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new CanvasTimeout(`${what} did not answer within ${ms} ms`)), ms);
+    timer = wallClockTimeout(() => reject(new CanvasTimeout(`${what} did not answer within ${ms} ms`)), ms, (t) => { timer = t; });
   });
   return Promise.race([work, expired]).finally(() => clearTimeout(timer));
 }
