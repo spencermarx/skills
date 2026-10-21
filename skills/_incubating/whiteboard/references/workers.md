@@ -3,8 +3,9 @@
 Read by the lead before it spawns the first worker, on every `revive` item (§ Revival), and
 when it acts for a worker after a compaction; and by each worker at spawn. A worker
 is a tracked subagent that draws on the same board as its own cursor and takes Sends from
-its own queue. The lead's own loop is [`SKILL.md`](../SKILL.md) §2; the design is
-[`SPEC.md`](../SPEC.md) §4, §8.5 and decisions #33 to #45.
+its own queue. A harness without subagents never spawns workers: the lead does the pieces one
+after another. The lead's own loop is [`SKILL.md`](../SKILL.md) §2; the design spec (§4, §8.5)
+is `docs/whiteboard/SPEC.md` in https://github.com/spencermarx/skills.
 
 ## The brief each worker gets
 
@@ -12,26 +13,27 @@ The worker did not load the skill, so its spawn prompt carries everything it nee
 start. Hand each worker:
 
 - **its `clientKey`**, which is also its recipient id, for example `worker-2`, and a display
-  name no other agent on the board uses, such as `Claude-2`, which a replacement keeps;
+  name no other agent on the board uses, such as `Agent-2`, which a replacement keeps;
 - **the bridge URL**, `http://127.0.0.1:<port>`, with the `<port>` you captured at boot;
 - **its region**: the shapes or area it owns, disjoint from every other agent's;
 - **what to read**: `<skill dir>/references/workers.md` § Worker loop, then
   `<skill dir>/SKILL.md` §2 steps (b) to (g), the read-act turn, and
   `<skill dir>/references/tldraw-editor-api.md`, the write API step (d) uses. Write
-  `<skill dir>` as the absolute path `${CLAUDE_SKILL_DIR}` expands to in your session.
+  `<skill dir>` as this skill's directory, resolved to an absolute path.
 
-Keep the agent id or name the spawn returns. That is how you address the worker with
-`SendMessage`; its bridge `sessionId` is not, and it can change on revival.
+Keep the agent id or name the spawn returns. That is how you message the worker later, if your
+harness can message a running subagent; its bridge `sessionId` is not, and it can change on
+revival.
 
 ## Spawning
 
 Spawn workers when one Send splits into independent pieces ("flesh out each box into a
-subsystem"), or when the operator asks. Each is a **tracked** subagent, never detached: a
+subsystem"), or when the user asks. Each is a **tracked** subagent, never detached: a
 detached one dies at run end and orphans its work. One lead and zero workers is the ordinary
 case.
 
-**Disjoint regions are a convention, not a lock.** The operator can aim Sends at workers
-independently, so the operator keeps the convention as much as you do. Two agents on the
+**Disjoint regions are a convention, not a lock.** The user can aim Sends at workers
+independently, so the user keeps the convention as much as you do. Two agents on the
 same shapes can clobber each other; `meta.lastEditedBy` keeps a clobber visible. `/exec`
 calls are serialized on the one Editor, so concurrent writes never corrupt the store.
 
@@ -39,7 +41,7 @@ calls are serialized on the one Editor, so concurrent writes never corrupt the s
 
 The panel's recipient box aims a Send at the lead (the default), a named worker, or
 `everyone` (all workers). The recipient routes the Send straight to that agent's queue; the
-lead never relays operator input to workers. **Typing a new name does not create a worker.**
+lead never relays user input to workers. **Typing a new name does not create a worker.**
 The bridge accepts `lead` or a `clientKey` that has registered on this board at least once (kept
 after the worker dies and across a restart of the board, so a Send can wait for it), and answers
 `400` for any other `recipient` on
@@ -54,7 +56,7 @@ worker registering on a `guest-` key gets a `400`
 ## Worker loop
 
 1. **Register** with your own key and transcript path (resolved as in SKILL.md §1 step 6):
-   `POST /session/register {"name":"Claude-2","clientKey":"worker-2","transcriptPath":"<path>"}`
+   `POST /session/register {"name":"Agent-2","clientKey":"worker-2","transcriptPath":"<path>"}`
    returns your `sessionId` and gives you a cursor. The `clientKey` is stable across death
    and revival, so routing keys on it; re-registering on it keeps one cursor, in the same color.
 2. **Self-park on your own queue**, in the foreground, carrying your `sessionId`, which the
@@ -93,7 +95,7 @@ only the lead, never a worker.
 
 ## Revival
 
-A subagent's lifetime is finite (`maxTurns`, autocompaction), so a parked worker can die
+A subagent's lifetime is finite (a turn limit, a context compaction), so a parked worker can die
 with a Send waiting. The Send is not lost: it waits in that worker's queue, and the lead
 gets a `revive` item on `/pending`,
 `{ kind:"revive", revive:"<recipientId>", name?, nudge }`: that worker has a pending Send and
@@ -102,10 +104,11 @@ that drops this file loses nothing.
 
 **What the lead does with a `revive` item, in the turn it arrives:**
 
-1. `SendMessage` that worker, addressed by the agent id or name the spawn returned (never
-   its bridge `sessionId`), with the item's `nudge` exactly as served. Never compose or
-   paraphrase a nudge: it carries no Send text, and the worker pulls its own queue.
-2. If the worker cannot be messaged, count your live subagents first (§ Scale), then spawn a
+1. If your harness can message a running subagent, message that worker, addressed by the
+   agent id or name the spawn returned (never its bridge `sessionId`), with the item's `nudge`
+   exactly as served (`harness-notes.md` says how in Claude Code). Never compose or paraphrase
+   a nudge: it carries no Send text, and the worker pulls its own queue.
+2. If it cannot be messaged, count your live subagents first (§ Scale), then spawn a
    replacement for the same `clientKey`, `name` and region with the brief in § The brief each
    worker gets, and end its prompt with the `nudge` exactly as served.
 
@@ -129,8 +132,7 @@ lead is the only agent that nudges a worker.
 
 ## Scale
 
-Design for 5 concurrent workers. The hard cap is the runtime's 20 concurrent subagents
-(`CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`). Resuming a completed subagent takes a fresh slot
-without re-checking the cap, so spawn, complete and revive churn can push the live count
-above what you expect: count before you revive, and never assume a completed worker freed its
-slot.
+Design for 5 concurrent workers. The hard cap is your harness's limit on concurrent subagents
+(`harness-notes.md` gives Claude Code's). Where resuming a completed subagent takes a fresh
+slot, spawn, complete and revive churn can push the live count above what you expect: count
+before you revive, and never assume a completed worker freed its slot.

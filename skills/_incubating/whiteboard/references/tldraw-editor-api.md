@@ -1,7 +1,10 @@
 # tldraw editor API — verified core + pointers
 
-Read before your first `POST /exec` in a session, and again after an
-autocompaction, before the next one (SKILL.md §2(d)).
+> Section references (SPEC §n) point at the design spec, `docs/whiteboard/SPEC.md` in
+> https://github.com/spencermarx/skills. You never need it to run the board.
+
+Read before your first `POST /exec` in a session, and again after a context
+compaction, before the next one (SKILL.md §2(d)).
 
 **These signatures are for `tldraw@5.4.2`.** If `app/package.json` pins a
 different version, re-verify against `app/node_modules` before trusting anything
@@ -89,7 +92,7 @@ every outbound push while the socket stayed connected, and later well-formed
 execs returned `ok:true` yet never reached the room. As of v9.5 a validate-first
 guard rejects the bad record before it reaches the crashing put, and the honest
 `/exec` contract plus server-owned recovery make a severed board impossible to
-miss. See the **sync-integrity invariant** in `../SPEC.md` §5: an `/exec` that
+miss. See the **sync-integrity invariant** in the design spec §5: an `/exec` that
 returns `ok` has reached the room, and a corrupted store that a sync-health probe
 reads is auto-recovered and announced, never silently dropped.
 
@@ -141,7 +144,7 @@ inside a blob when you need live state mid-exec.
 - `editor.zoomToBounds(bounds: BoxLike, opts?): this` — `:2439` (`BoxLike` is `{ x, y, w, h }`)
 
 After drawing, `editor.select(...)` the shapes you touched — this is the
-"point back" the loop owes the operator.
+"point back" the loop owes the user.
 
 ### Bound arrows (the part that changed) — `createBinding`
 
@@ -197,7 +200,7 @@ return { from, to, arrow } // the ids, for a later updateShapes
 ```
 
 Because the arrow is *bound* (not fixed to coordinates captured from a stale
-read), it follows either box when the operator drags it — the placement
+read), it follows either box when the user drags it — the placement
 robustness §5 asks for.
 
 ### Exporting a PNG (perception loop)
@@ -248,7 +251,7 @@ so read them there rather than reconstructing a signature from memory.
 
 ## Sync + presence (v3 multi-peer) — pointers only
 
-v3 makes the board a **sync room** with the operator's browser, the headless
+v3 makes the board a **sync room** with the user's browser, the headless
 render-canvas, and each agent as peers (SPEC §3, §4, §7). The core above is the
 **write API** and is unchanged. The sync and presence APIs below are **not
 transcribed here** — they changed across versions and the multi-peer /
@@ -261,9 +264,9 @@ reconstruct from these lines.
 - **Sync client (the app joins a room):** `useSync` — `app/node_modules/@tldraw/sync/dist-cjs/index.d.ts` (`useSync(opts)` → a remote store; worked examples in the file header). This is what `role=human` and `role=agent` use instead of a local store.
 - **What each peer broadcasts as its cursor:** `useSync`'s **`getUserPresence?(store, user): null | TLPresenceStateInfo`** option (verified `@tldraw/sync/dist-cjs/index.d.ts:193`, `:323`) customizes the presence a peer contributes; `TLPresenceStateInfo` is re-exported from `tldraw`, and `getDefaultUserPresence` (`@tldraw/tlschema`) is the default it layers on. Leave `presenceMode` at `atom('full')` — see below.
 - **Sync server (authoritative room, persistence):** `TLSocketRoom` — `server/node_modules/@tldraw/sync-core/dist-cjs/index.d.ts` (the `TLSocketRoom` class; check its constructor options and the on-change / snapshot hooks the server uses to persist the `.tldr`).
-- **Server-injected per-agent cursors (the fragile part, SPEC §7):** one `TLSocketRoom` client broadcasts **exactly one** presence record and replicates only **document-scoped** diffs, so writing N `instance_presence` records into a store does **not** propagate to human peers. The supported path is **N presence-only sync clients**, one per session: `TLSyncClient` (`server/node_modules/@tldraw/sync-core/dist-cjs/index.d.ts`) takes `presence: Signal<null | R>` and `presenceMode?: Signal<TLPresenceMode>` (verified `:1514`–`:1515`); `presenceMode` **must** be `atom('full')` or post-connect presence updates silently drop. The working implementation is `server/presence.ts` (`PresenceManager`) — read it before touching cursor injection.
+- **Server-injected per-agent cursors (the fragile part, SPEC §7):** one `TLSocketRoom` client broadcasts **exactly one** presence record and replicates only **document-scoped** diffs, so writing N `instance_presence` records into a store does **not** propagate to human peers. The supported path is **N presence-only sync clients**, one per session: `TLSyncClient` (`@tldraw/sync-core`'s `dist-cjs/index.d.ts` under the server's `node_modules`) takes `presence: Signal<null | R>` and `presenceMode?: Signal<TLPresenceMode>` (verified `:1514`–`:1515`); `presenceMode` **must** be `atom('full')` or post-connect presence updates silently drop. The working implementation is `server/presence.ts` (`PresenceManager`) — read it before touching cursor injection.
 - **Presence records (a named, colored agent cursor):** `TLInstancePresence` / `InstancePresenceRecordType` — `app/node_modules/@tldraw/tlschema/dist-cjs/index.d.ts` (the `instance_presence` record: `userName`, cursor position, etc.).
-- **Docs:** `https://tldraw.dev/docs/sync` (WebFetch) for the sync model and self-hosting; cross-check anything version-sensitive against the installed types, since the site tracks latest.
+- **Docs:** `https://tldraw.dev/docs/sync` (fetch the page) for the sync model and self-hosting; cross-check anything version-sensitive against the installed types, since the site tracks latest.
 
 ## Explore as needed — the authoritative sources
 
@@ -276,7 +279,7 @@ For anything outside the verified core above, **read one of these, do not guess*
    - Grep a symbol: `grep -n "createBinding\|toImage\|GeoShapeGeoStyle" app/node_modules/@tldraw/*/dist-cjs/index.d.ts`
 2. **tldraw.dev docs.**
    - Reference: `https://tldraw.dev/reference`
-   - LLM-oriented dumps: `https://tldraw.dev/llms.txt` and `https://tldraw.dev/llms-full.txt` — WebFetch these for a fuller API surface than fits here. Cross-check anything version-sensitive against the installed types, since the site tracks latest.
+   - LLM-oriented dumps: `https://tldraw.dev/llms.txt` and `https://tldraw.dev/llms-full.txt` — fetch these for a fuller API surface than fits here. Cross-check anything version-sensitive against the installed types, since the site tracks latest.
 
 If a call cannot be verified against the installed types or the docs, say so in
 the `/agent-message` rather than shipping a guessed blob.

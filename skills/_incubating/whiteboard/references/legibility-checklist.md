@@ -6,14 +6,12 @@ until every item passes. Aesthetics (below) are *not* gated — do not loop on t
 
 ## The gate, step by step
 
-1. `GET /image`, then dispatch the blind critic (below) with only the PNG path
+1. `GET /image`, then run the blind critic (below) with only the PNG path
    and the "Must pass" items, never the instruction or the `/exec` code. It
    returns pass or fail per item, locating each fail.
 2. On a fail, correct with `/exec` and re-run the critic, at most 3 rounds. If it
    still fails, `/agent-message` that the board may be hard to read, and where.
 3. Once legibility passes, take at most one aesthetic pass, then stop.
-
-Alone on a board you may check the PNG yourself against the checklist.
 
 ## Must pass (legibility)
 
@@ -37,19 +35,24 @@ items above pass, take **at most one** aesthetic pass, then stop.
 
 ## The blind critic
 
-The drawing turn grades its own work and is optimistic about it — the failure
-mode this exists to catch. So the check is run by **fresh eyes, blind to intent**,
-the same posture as [`humanize-reader`](../../../agents/humanize-reader.md) and
-[`vault-critic`](../../../agents/vault-critic.md) for prose.
+The drawing turn grades its own work and is optimistic about it: that is the
+failure this exists to catch. So the check is run by fresh eyes, blind to intent.
 
-Dispatch a **tracked subagent** and hand it **only**:
-- the exported PNG path (have it `Read` the image), and
-- this checklist (the "Must pass" items).
+If you can dispatch subagents, dispatch one with the prompt below, filling in the
+PNG path. Hand it nothing else: not the instruction, not the intent, not the
+`/exec` code. It judges what is on the pixels, not what you meant to draw. If you
+cannot dispatch subagents, run the prompt yourself, but view the fresh PNG before
+re-reading the instruction, and judge only what you can point to in the image.
 
-Do **not** tell it the instruction, the intent, or the `/exec` code — it judges
-what is on the pixels, not what you meant to draw. Ask it to return, per item,
-**pass / fail**, and for each fail a one-line locator ("Bridge box: title
-'Bridge (HTTP + WS)' clipped at the top edge"). It reports; it does not fix.
+> You are checking a rendered whiteboard image for legibility. Open the image at
+> `<png path>` and look at it. For each of the five "Must pass" items below,
+> answer **pass** or **fail**. For each fail, give a one-line locator naming the
+> shape and the defect, for example "Bridge box: title 'Bridge (HTTP + WS)'
+> clipped at the top edge". Report only; do not suggest a redesign.
+>
+> <paste the five "Must pass" items>
 
-The drawing agent then fixes the reported defects and re-runs the critic, per
-§ The gate, step by step: never silently point back to a broken board.
+The lead fixes the reported defects with a corrective `/exec` and re-runs the
+critic. Bound the gate to **3 rounds**; if it still fails, post an
+`/agent-message` saying the board may be hard to read and where, rather than
+silently pointing back to a broken board.

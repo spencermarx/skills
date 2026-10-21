@@ -3,7 +3,7 @@
 Read when `POST /exec` answers `200` with `ok:false`, and when any route answers a `503` other
 than `/image`'s `no image produced` (which is only an empty board). Read it before you retry
 anything.
-The design is [`SPEC.md`](../SPEC.md) §5 and decisions #56, #64 and #67.
+The design spec (§5) is `docs/whiteboard/SPEC.md` in https://github.com/spencermarx/skills.
 
 ## A `503`: the render-canvas could not answer
 
@@ -11,7 +11,7 @@ The call never reached a canvas, so nothing was drawn and its `idempotencyKey` w
 
 1. Poll `GET /canvas-status` every 10 s while it reads `relaunching: true`.
 2. Then retry the call once.
-3. If that `503`s too, report its `lastExportError` and `lastNavError` to the operator.
+3. If that `503`s too, report its `lastExportError` and `lastNavError` to the user.
    `self-heal failed` means the relaunch gave up.
 
 ## `ok:false` from `/exec`: the blob may have drawn
@@ -72,9 +72,9 @@ blob left.
   after a timeout, the room holds what the blob had drawn when recovery read the canvas.
 - **`recovered: false`, a line ending `Reload it, or restart the whiteboard.`** (`Manual
   recovery needed: the board could not be repaired after <reason> (<detail>). The canvas may be
-  frozen.`): stop drawing, quote the line to the operator, and leave the call to them.
-  Restarting is a close and a reopen (SKILL.md §5, then `/whiteboard open <board>`), done only
-  on their explicit instruction; never stop the board's job yourself.
+  frozen.`): stop drawing, quote the line to the user, and leave the call to them.
+  Restarting is a close and a reopen (SKILL.md §5, then §1), done only on their explicit
+  instruction; never stop the board's server yourself.
 - **`recovered: false`, any other line**: it asks you to read the board and redraw what is
   missing. Do that as for `ok:false` above: read `/shapes` and `/image`, and redraw only what is
   missing under a new `idempotencyKey`.
@@ -105,4 +105,4 @@ blob left.
     Sending it again may land.
   - `gone`: the canvas's record list left the asset out: it was deleted from the canvas while
     recovery read it, by someone else or by the blob, and is not in the room either. Ask the
-    operator before you redraw it or what used it.
+    user before you redraw it or what used it.
