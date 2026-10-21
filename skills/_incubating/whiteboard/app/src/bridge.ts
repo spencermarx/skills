@@ -2,7 +2,7 @@
 // BRIDGE CONTRACT (app ↔ Node bridge + sync server) — the seam the bridge
 // builder must match. See SPEC.md §3/§4/§5/§6/§7.
 //
-// One Node process serves three things on the SAME origin (http://127.0.0.1:<port>):
+// One Node process serves three things on the SAME origin (http://127.0.0.1:5179):
 //   1. app/dist static  at /
 //   2. the sync server  at /sync/<room>   (WS; @tldraw/sync-core TLSocketRoom,
 //      one room per board — this is where the board itself lives + persists)
@@ -13,7 +13,7 @@
 //   ?role=human|agent   (default human)   which surface this instance is
 //   ?room=<slug>        (default board)   which sync room to join
 // The bridge launches the headless render-canvas (Playwright) with
-//   ?role=agent&room=<slug>&canvasKey=<per-process secret>  and opens the operator's browser with
+//   ?role=agent&room=<slug>  and opens the operator's browser with
 //   ?role=human&room=<slug>.
 //
 // ── SYNC (v3) ────────────────────────────────────────────────────────────────
@@ -54,25 +54,24 @@
 // HTTP endpoints the app CALLS on the bridge:
 //   POST /message   body {text, selection:string[], idempotencyKey, recipient?}  operator Send (human)
 //                   [v6] `recipient` is {kind,id?,name?}; absent == the lead (v5 default).
-//   GET  /boards         → [{name, path, source, room}]          board discovery
-//   POST /board/open       body {path}  → {attach, port?, room}  switch active board
-//   POST /board/new        body {name}  → {attach, port?, room}  create empty board
-//        `room` is the server's id for the board (derived from its file path); the app always
-//        joins the room the server names. A board the server cannot load is a 4xx with {error}.
+//   GET  /boards         → [{name, path, source, room?}]         board discovery
+//   POST /board/open       body {path}                          switch active board
+//   POST /board/new        body {name}                          create empty board
 //   POST /image-upload?id=<id>   raw body, Content-Type image/png   PNG export delivery
-//        (bridge writes the bytes to <boards folder>/<room>.png and owns the
+//        (bridge writes the bytes to .scratchpad/whiteboard/<name>.png and owns the
 //         path; `id` correlates the upload with the exec/export that triggered it.)
 //   POST /request-teardown  body {room}  → {ok:true}                 operator teardown (human)
 //        [v9.1, SPEC §8.2/§8.4, decision #53] The confirm-gated close-session control's
 //        signal. NOT a chat Message: it never enters the attributed log or a recipient queue.
 //        The bridge sets a per-room teardown-requested flag (surfaced on GET /canvas-status
-//        below and raised to the lead's supervise=1 poll as a teardown directive); the LEAD
-//        performs the actual graceful POST /done. This is the operator's ONLY deliberate
+//        below, rung on the lead's doorbell and handed to its GET /pending pull as a teardown
+//        item); the LEAD performs the actual graceful POST /done. This is the operator's ONLY deliberate
 //        teardown signal — the lead never hangs up at its own discretion (SPEC §7/§9).
 //
 // WS /events frames (the render-canvas connects as role=agent, the operator as
 // role=human; the app tags its socket with ?role & ?room):
-//   up   (app→bridge): {type:'store-change', diff:{added,updated,removed}} (shape ids only)
+//   up   (app→bridge): {type:'message', text, selection}                 (human)
+//                      {type:'store-change', diff:{added,updated,removed}} (shape ids only)
 //                      {type:'exec-result', id, ok, result?, error?}      (agent)
 //                      {type:'image', id, ok, error?}                     (agent, upload notice)
 //   down (bridge→app): {type:'exec', id, code, sessionId?,
@@ -86,12 +85,8 @@
 //                          [v5] a Send's lifecycle change; panel matches by `id`.
 //                          [v6] `recipient` echoes which recipient this state is for
 //                          (a broadcast reports the aggregate over all its workers).
-//                      {type:'parked', agentParked:boolean}              (→ human)
-//                          [v5] a lead parked/left; drives the LEAD avatar's parked dot.
-//                      {type:'lead-alive', leadAlive:boolean}            (→ human)
-//                          [v9.3] the lead's honest liveness (armed listener or receipt holder
-//                          within the grace window); drives the LEAD-default no-agent banner and
-//                          the avatar dim, staying true through the wake→re-arm gap.
+//                          [v9.11 #64] a lead Send's state is per item (rung / fetched /
+//                          not-heard / done); it drives the LEAD-default "not heard" notice.
 //                      {type:'agent-status', agents:AgentStatus[]}       (→ human)
 //                          [v6] the per-agent roster + lifecycle/parked; drives the
 //                          recipient selector's worker list and the status strip (SPEC §7).
@@ -140,27 +135,35 @@ export function readAuthor(): { name: string; authorKey?: string } {
 // Base-URL derivation (SPEC §3 / §8.3 build constraint). The bridge serves this
 // app SAME-ORIGIN on an OS-assigned ephemeral port, so the HTTP base is
 // `window.location.origin` and the WS base is the ws(s):// equivalent of
-// `window.location.host`, never a hardcoded port. There is no separate dev
-// server: the bridge refuses every request that is not from its own page, so the
-// app only ever runs as the bridge serves it. To iterate, rebuild
-// (`npm run build`) and reload the board.
+// `window.location.host` — NEVER a hardcoded port. The single exception is the
+// Vite dev server (`import.meta.env.DEV`), where the app runs on its own port and
+// the bridge is reached at a fixed localhost dev port.
+const DEV_BRIDGE_HOST = '127.0.0.1:5179'
+
+function isDev(): boolean {
+  return typeof import.meta !== 'undefined' && Boolean(import.meta.env?.DEV)
+}
+
+// HTTP origin of the bridge (no trailing slash). Served case: window.location.origin.
 function httpOrigin(): string {
-  return location.origin
+  if (isDev()) return `http://${DEV_BRIDGE_HOST}`
+  if (typeof location !== 'undefined' && location.origin) return location.origin
+  return `http://${DEV_BRIDGE_HOST}`
 }
 
 // WS origin of the bridge (ws://host or wss://host), protocol matched to the page.
 function wsOrigin(): string {
-  return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`
+  if (isDev()) return `ws://${DEV_BRIDGE_HOST}`
+  if (typeof location !== 'undefined' && location.host) {
+    return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`
+  }
+  return `ws://${DEV_BRIDGE_HOST}`
 }
 
 // The bridge control-channel WS. Tag the socket with role + room so the bridge
 // routes exec/presence to the render-canvas and agent-message to the operator.
-// The render-canvas also passes on the `canvasKey` its URL carries: the bridge
-// gives the role=agent slot only to the page it launched itself.
 export function wsUrl(role: Role, room: string): string {
-  let q = `role=${encodeURIComponent(role)}&room=${encodeURIComponent(room)}`
-  const canvasKey = role === 'agent' ? new URLSearchParams(location.search).get('canvasKey') : null
-  if (canvasKey) q += `&canvasKey=${encodeURIComponent(canvasKey)}`
+  const q = `role=${encodeURIComponent(role)}&room=${encodeURIComponent(room)}`
   return `${wsOrigin()}/events?${q}`
 }
 
@@ -173,7 +176,7 @@ export function apiUrl(path: string): string {
   return `${httpOrigin()}${path}`
 }
 
-export type BoardEntry = { name: string; path: string; source: string; room: string }
+export type BoardEntry = { name: string; path: string; source: string; room?: string }
 
 export async function fetchBoards(): Promise<BoardEntry[]> {
   const res = await fetch(apiUrl('/boards'))
@@ -206,10 +209,12 @@ export type AuthorIdentity = {
 export type AuthorStamp = AuthorIdentity & { at: number }
 
 // [v5.1, SPEC §8.2] A human Send's lifecycle state, computed server-side (single source of
-// truth). queued: awaiting a lead. working: leased to a live lead that is drawing it.
-// stalled: was delivered but the lead went silent — the lease expired and it is re-queued
-// for redelivery. done: completed. The panel renders this directly (never re-derives it).
-export type SendState = 'queued' | 'working' | 'stalled' | 'done'
+// truth); the panel renders it directly (never re-derives it). [v9.11 #64] A lead Send: queued
+// (no ring yet), rung (the doorbell reached the owning session), fetched (the lead pulled it:
+// the pull is the receipt), not-heard (unfetched after the re-rings ran out, or no ring could
+// reach the session), done. A worker Send: queued, working (leased to a live worker), stalled
+// (its lease expired and it is re-queued), done.
+export type SendState = 'queued' | 'rung' | 'fetched' | 'not-heard' | 'working' | 'stalled' | 'done'
 
 // [v6, SEAM §1/§2, SPEC §4/§8.2] The routing target of a human Send. `id` is the
 // STABLE recipient id — the lead's reserved `'lead'`, or a worker's `clientKey` —
@@ -237,8 +242,8 @@ export type Message = {
   // default), so a plain Send is byte-identical to v5. Does not change how the
   // message is stored, attributed, or shown — only who drains it.
   recipient?: Recipient
-  // [v5, SPEC §8.2] Send lifecycle (human Sends only): deliveredAt set when a lead takes the
-  // instruction via /next-instruction; completedAt when it reports the turn done via
+  // [v5, SPEC §8.2] Send lifecycle (human Sends only): deliveredAt set when the lead fetches it
+  // (GET /pending) or a worker takes it (/next-instruction); completedAt when it reports the turn done via
   // /instruction-complete. [v5.1] `state` is the authoritative label derived from these plus
   // the live lease — GET /messages and every `message-state` frame carry it. [v6] For a
   // broadcast these are the aggregate (done only once every worker completes).
@@ -257,24 +262,36 @@ export type AgentStatus = {
   name: string
   color: string // identity hex ('#7C4DFF'): live presence color, else a deterministic fallback
   role: 'lead' | 'worker'
-  parked: boolean // a live long-poll waiter exists for this id right now
-  lifecycle: 'idle' | 'queued' | 'working' | 'stalled' | 'absent'
+  parked: boolean // a live long-poll waiter exists for this worker right now (never the lead)
+  // [v9.11 #64] The lead's lifecycle is read off its items: working (a fetched Send is
+  // uncompleted), not-heard, queued, idle (registered, nothing pending), absent (no lead).
+  lifecycle: 'idle' | 'queued' | 'working' | 'stalled' | 'not-heard' | 'absent'
+  // [v9.11 #64, SPEC #33] A guest session (another Claude session joined to look, registered with
+  // `guest: true`). Shown in the presence row, with its cursor, but never offered as a recipient:
+  // the server refuses a Send to it. Absent on every non-guest entry and from a pre-guest bridge.
+  guest?: boolean
 }
 
-// [v5, SPEC §8.6/§11, decision #29] The bridge's liveness snapshot. `agentParked` is
-// true iff a live long-poll waiter (a parked LEAD) exists; false is the loud
-// "nobody's listening" signal for the default (lead) recipient. [v6] `agents` is the
+// [v9.11 #64] The doorbell's state as /canvas-status reports it: whether the board server has an
+// inbox socket to ring, its ring count and last outcome, the open-time canary, and each unfetched
+// lead item's state.
+export type DoorbellStatus = {
+  inbox: boolean
+  lead: boolean
+  rings: number
+  lastRingAt: number | null
+  lastRingOk: boolean | null
+  lastRingError: string | null
+  canary: 'queued' | 'rung' | 'fetched' | 'not-heard' | null
+  items: { id: string; state: 'queued' | 'rung' | 'not-heard'; reason?: string }[]
+}
+
+// [v5, SPEC §8.6/§11, decision #29] The bridge's status snapshot. [v6] `agents` is the
 // per-agent roster (SEAM §7) — the recipient selector's worker list and the status
 // strip seed from it, then stay live over the `agent-status` frame.
 export type CanvasStatus = {
-  agentParked: boolean
-  // [v9.3, SPEC §9, decision #55] The honest lead-liveness signal: true when an armed lead listener
-  // exists OR the receipt holder was seen within the grace window; false only on confirmed death.
-  // The panel keys the "no one on the board" banner and the lead avatar dim on THIS, not the
-  // transient `agentParked`, so a normal turn's wake→re-arm gap never reads as "session ended".
-  // Optional so a pre-v9.3 bridge that omits it reads as unknown (never accuse) rather than throwing.
-  leadAlive?: boolean
   agents: AgentStatus[]
+  doorbell?: DoorbellStatus
   // [v9.1, SPEC §8.2/§8.4, decision #53] Whether the operator has requested teardown for this
   // room (via POST /request-teardown). The panel reflects it as a calm "closing…" state until
   // the lead performs its graceful /done. Optional so a pre-v9.1 bridge that omits it reads as
@@ -285,9 +302,8 @@ export type CanvasStatus = {
   activeRoom?: string
 }
 
-// Seed `agentParked` on panel load / reconnect (SPEC §8.6). A failure leaves the
-// flag unknown; the panel treats unknown as "don't accuse", falling back to the live
-// `parked` WS frame once it arrives.
+// Seed the roster and the closing state on panel load / reconnect (SPEC §7). A failure leaves
+// them as they were; the live WS frames keep them current.
 export async function fetchCanvasStatus(): Promise<CanvasStatus> {
   const res = await fetch(apiUrl('/canvas-status'))
   if (!res.ok) throw new Error(`GET /canvas-status ${res.status}`)
@@ -305,38 +321,75 @@ export async function fetchMessages(room: string, since?: number): Promise<Messa
   return body.messages ?? []
 }
 
+// [v9.11 #64] A bridge call the server answered with a non-2xx status. `status` lets the panel
+// tell a refusal it must not retry (4xx: a bad recipient, a guest recipient, the Origin/Host
+// guard's 403) from a server fault it may (5xx). A network error (the board is down) is the
+// fetch's own TypeError, never this. `serverError` is the `error` text the server put in its JSON
+// body, when it sent one, so the panel can show the operator why a request was refused.
+export class HttpError extends Error {
+  readonly status: number
+  readonly serverError?: string
+  constructor(status: number, message: string, serverError?: string) {
+    super(message)
+    this.name = 'HttpError'
+    this.status = status
+    this.serverError = serverError
+  }
+}
+
+// [v9.11 #64] How long a Send or teardown POST may take before the panel gives up on it. A half-open
+// socket after a laptop sleep can leave a POST hanging with no error; the panel posts these one at
+// a time, so one hung POST would otherwise hold every later Send. The abort surfaces as the fetch's
+// own AbortError, never an `HttpError`, so the panel treats it as the board being unreachable.
+const POST_TIMEOUT_MS = 10_000
+
+async function postJsonWithTimeout(path: string, body: unknown): Promise<Response> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), POST_TIMEOUT_MS)
+  try {
+    return await fetch(apiUrl(path), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 // Operator Send (SPEC §4/§8.2). `idempotencyKey` doubles as the message `id` so
 // the server stores it under that id and the panel dedupes its optimistic echo
 // against the stored copy. [v6] `recipient` routes the Send (SEAM §3); it is
 // OMITTED from the body when absent so a lead-addressed Send is byte-identical to
 // the v5 shape (absent == the lead — keeps the zero-worker case unchanged).
+// [v9.11 #64] Throws on a non-2xx (`HttpError`, carrying the status) as well as on a network
+// error, so a refused or undelivered Send is never shown as queued. A retry under the same key
+// is safe: the server dedupes /message on its id. `room` names this tab's board, so a server that
+// now hosts a different board on this tab's old port answers 409 instead of storing the Send there.
+// The POST gives up after `POST_TIMEOUT_MS`.
 export async function postMessage(
   text: string,
   selection: string[],
   idempotencyKey: string,
   recipient?: Recipient,
 ): Promise<void> {
-  const body: Record<string, unknown> = { text, selection, idempotencyKey }
+  const body: Record<string, unknown> = { text, selection, idempotencyKey, room: readRoom() }
   if (recipient) body.recipient = recipient
-  await fetch(apiUrl('/message'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
+  const res = await postJsonWithTimeout('/message', body)
+  if (!res.ok) throw new HttpError(res.status, `POST /message ${res.status}`)
 }
 
 // [v9.1, SPEC §8.2/§8.4, decision #53] Post the operator's confirm-gated teardown request. A
 // distinct control signal, not a `POST /message`, so it never enters the attributed chat log or
-// a recipient queue: the bridge raises a per-room teardown directive on the lead's supervise poll
-// and the LEAD performs the graceful `POST /done`. Throws on a non-200 so the panel can revert its
+// a recipient queue: the bridge rings the lead's doorbell and hands it a teardown item on its
+// GET /pending pull, and the LEAD performs the graceful `POST /done`. Throws on a non-200 so the panel can revert its
 // optimistic "closing…" state rather than get stuck. Success is `{ ok: true }`.
+// [v9.11 #64] A non-2xx throws an `HttpError`, so the panel's outbound queue can tell a refusal
+// (4xx) from the board being down, exactly as for a Send; the POST gives up after `POST_TIMEOUT_MS`.
 export async function requestTeardown(room: string): Promise<void> {
-  const res = await fetch(apiUrl('/request-teardown'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ room }),
-  })
-  if (!res.ok) throw new Error(`POST /request-teardown ${res.status}`)
+  const res = await postJsonWithTimeout('/request-teardown', { room })
+  if (!res.ok) throw new HttpError(res.status, `POST /request-teardown ${res.status}`)
 }
 
 // [v8 §8.3] The bridge's answer to "open this board". `attach:true` means the board is already
@@ -345,6 +398,11 @@ export async function requestTeardown(room: string): Promise<void> {
 // `attach:false` means this process switched to the board in-process (the common single-server case).
 export type OpenBoardResult = { attach: boolean; port?: number; room: string }
 
+// [v9.11 #64] A switch the server refuses (409: the board is still being released or does not
+// answer, or [#65] a server from before #64 is running, named by pid, port and board; 422: the
+// board would not load) throws an `HttpError` carrying the status and the
+// server's `error` text, with nothing changed on the server, so the panel stays on this board and
+// shows that text. A body that is not JSON leaves `serverError` unset.
 async function postBoard(endpoint: string, body: Record<string, string>): Promise<OpenBoardResult> {
   const res = await fetch(apiUrl(endpoint), {
     method: 'POST',
@@ -352,8 +410,14 @@ async function postBoard(endpoint: string, body: Record<string, string>): Promis
     body: JSON.stringify(body),
   })
   if (!res.ok) {
-    const why = ((await res.json().catch(() => ({}))) as { error?: string }).error
-    throw new Error(why ?? `POST ${endpoint} ${res.status}`)
+    let serverError: string | undefined
+    try {
+      const b = (await res.json()) as { error?: unknown }
+      if (typeof b.error === 'string' && b.error) serverError = b.error
+    } catch {
+      /* not a JSON body */
+    }
+    throw new HttpError(res.status, `POST ${endpoint} ${res.status}`, serverError)
   }
   const b = (await res.json()) as { attach?: boolean; port?: number; room: string }
   return { attach: !!b.attach, port: b.port, room: b.room }
@@ -373,4 +437,11 @@ export async function uploadImage(id: string, blob: Blob): Promise<void> {
     headers: { 'Content-Type': 'image/png' },
     body: blob,
   })
+}
+
+// A board's slug for the ?room= query. The bridge may return an explicit `room`
+// on each BoardEntry; otherwise derive a stable slug from the board name.
+export function roomForBoard(entry: BoardEntry): string {
+  if (entry.room) return entry.room
+  return entry.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'board'
 }

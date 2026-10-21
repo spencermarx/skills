@@ -1,7 +1,7 @@
 # tldraw editor API — verified core + pointers
 
-> Section references (SPEC §n, decision #n) point at the design spec, `docs/whiteboard/SPEC.md` in
-> https://github.com/spencermarx/skills. You never need it to run the board.
+Read before your first `POST /exec` in a session, and again after an
+autocompaction, before the next one (SKILL.md §2(d)).
 
 **These signatures are for `tldraw@5.4.2`.** If `app/package.json` pins a
 different version, re-verify against `app/node_modules` before trusting anything
@@ -18,6 +18,10 @@ in the `/exec` scope alongside `editor`. If one is not defined in a blob, read
 how the app builds the exec sandbox rather than assuming — do not silently
 substitute a hand-rolled id string.
 
+Two habits every `/exec` keeps: prefer bindings and relative placement, so a
+nudged box keeps its arrow (§ Bound arrows), and size `geo` boxes to their text
+up front, or the label clips (§ Legible geo text, the geo-text landmine).
+
 ## Verified core (tldraw@5.4.2)
 
 Each entry names the source that verified it (installed type path, or DOCS.md
@@ -28,8 +32,23 @@ shipped inside the package). Paths are relative to the skill root.
 - `createShapeId(id?: string): TLShapeId` — `app/node_modules/@tldraw/tlschema/dist-cjs/index.d.ts:1052`
 - `createBindingId(id?: string): TLBindingId` — same file, `:689`
 
-Call with no argument for a fresh id; pass a string only when you need a stable,
-predictable id within one blob.
+Give every new shape a fresh id, `createShapeId()` with no argument: it never
+collides. A named id is one id for the whole board (`createShapeId('store')` is
+`shape:store` for every draw and every worker), and `createShapes` on an id that
+exists would replace that shape whole, resetting what the call does not pass. So
+the render-canvas refuses it: `/exec` answers `ok:false`, `… already exists;
+change it with updateShapes`. Change a shape that exists with `updateShapes`, by
+the id `/shapes` lists or your blob returned (`return { from, to, arrow }`, as in
+the example below).
+
+Await everything a blob starts. Work it leaves running after it returns (an
+un-awaited promise, a timer) is not stopped: it lands after the answer, stamped
+with the name of whichever exec is running then, or with none.
+
+A blob that throws is not undone: what it wrote before the throw stays, though
+tldraw may roll back the writes of an `editor.run` the throw escapes. When
+`/exec` answers `ok:false`, or any call answers a `503`, read
+[`exec-failures.md`](exec-failures.md) before you retry.
 
 ### Create / update / delete shapes
 
@@ -70,9 +89,9 @@ every outbound push while the socket stayed connected, and later well-formed
 execs returned `ok:true` yet never reached the room. As of v9.5 a validate-first
 guard rejects the bad record before it reaches the crashing put, and the honest
 `/exec` contract plus server-owned recovery make a severed board impossible to
-miss. See the **sync-integrity invariant** in the design spec §5: an `/exec` that
-returns `ok` has reached the room, and a corrupted store is auto-recovered and
-announced, never silently dropped.
+miss. See the **sync-integrity invariant** in `../SPEC.md` §5: an `/exec` that
+returns `ok` has reached the room, and a corrupted store that a sync-health probe
+reads is auto-recovered and announced, never silently dropped.
 
 Geo text goes in `props.richText` via `toRichText`:
 
@@ -139,6 +158,13 @@ Arrow-binding props (`TLArrowBindingProps`,
 `toId` is the **target shape** (`TLArrowBinding` example, same file `:3357`; the
 `createBinding` shape is confirmed by the package's own DOCS.md `:5516`).
 
+Each `createBinding` adds a binding, and an arrow follows the first one on each
+terminal, so binding a terminal that is already bound changes nothing you can
+see. To re-point an arrow, change the binding it has:
+`editor.getBindingsFromShape(arrow, 'arrow')` lists them, and
+`editor.updateBinding({ id, type: 'arrow', toId })` moves one
+(`@tldraw/editor/dist-cjs/index.d.ts:3438`, `:3479`).
+
 ### `/exec` example — two boxes and a BOUND arrow, the 5.4.2 way
 
 ```js
@@ -167,6 +193,7 @@ editor.createBinding({
 })
 
 editor.select(from, to, arrow)
+return { from, to, arrow } // the ids, for a later updateShapes
 ```
 
 Because the arrow is *bound* (not fixed to coordinates captured from a stale
@@ -195,12 +222,13 @@ so read them there rather than reconstructing a signature from memory.
 - **The side-effect surface:** `editor.sideEffects: StoreSideEffects<TLRecord>` —
   `app/node_modules/@tldraw/editor/dist-cjs/index.d.ts:1324`.
 - **Create / change handlers** (register on the `'shape'` type):
-  `registerAfterCreateHandler(typeName, handler)` —
-  `app/node_modules/@tldraw/store/dist-cjs/index.d.ts:2666`; and
-  `registerAfterChangeHandler(typeName, handler)` — same file, `:2719`. Their
-  handler types (`StoreAfterCreateHandler` `:1880`, `StoreAfterChangeHandler`
-  `:1858`) both hand the callback a trailing **`source: 'remote' | 'user'`**
-  argument (`ChangeSource`, `:379`).
+  `registerBeforeCreateHandler(typeName, handler)` —
+  `app/node_modules/@tldraw/store/dist-cjs/index.d.ts:2641`; and
+  `registerBeforeChangeHandler(typeName, handler)` — same file, `:2695`. A
+  before-handler returns the record to commit, which is how the stamp lands in the
+  same write. Their handler types (`StoreBeforeCreateHandler` `:1949`,
+  `StoreBeforeChangeHandler` `:1925`) both hand the callback a trailing
+  **`source: 'remote' | 'user'`** argument (`ChangeSource`, `:379`).
 - **The `source:'user'` filter is the whole landmine.** `'user'` is a **local**
   change; `'remote'` is a shape arriving over sync from another peer. Stamping must
   fire on **local changes only** — gate every handler on `source === 'user'`, or a
@@ -208,9 +236,13 @@ so read them there rather than reconstructing a signature from memory.
   store-listener surface takes the same filter: `store.listen(fn, { source: 'user',
   scope: 'document' })` (`StoreListenerFilters.source: 'all' | ChangeSource`,
   `:2036`; `store.listen` `:1779`).
-- **`createdBy` is stamped once and immutable** — the create handler sets it and
-  nothing overwrites it; only `lastEditedBy` is rewritten, by the change handler
-  (SPEC §8.6). Read the app's author-stamping wiring (the `app/` slice, SPEC §9
+- **`createdBy` is stamped once and immutable, and a copy is a new shape.** A local create of
+  an id this client has never held (a duplicate, a paste, a blob's create) is stamped
+  `createdBy` and `lastEditedBy` with the acting author, replacing whatever stamps the record
+  carried while its other `meta` keys stay; a local create of an id it has held (undo, redo, `moveShapesToPage`) keeps its
+  stamps. The change handler carries `createdBy` across every later local write, so no later
+  write can erase or replace it; only `lastEditedBy` is rewritten (SPEC §8.6). A blob never
+  sets `meta` itself (SPEC §5); a stamp one passes on a new shape is replaced. Read the app's author-stamping wiring (the `app/` slice, SPEC §9
   layout) for how the current author context is threaded into these handlers before
   citing anything beyond the signatures above.
 
@@ -229,7 +261,7 @@ reconstruct from these lines.
 - **Sync client (the app joins a room):** `useSync` — `app/node_modules/@tldraw/sync/dist-cjs/index.d.ts` (`useSync(opts)` → a remote store; worked examples in the file header). This is what `role=human` and `role=agent` use instead of a local store.
 - **What each peer broadcasts as its cursor:** `useSync`'s **`getUserPresence?(store, user): null | TLPresenceStateInfo`** option (verified `@tldraw/sync/dist-cjs/index.d.ts:193`, `:323`) customizes the presence a peer contributes; `TLPresenceStateInfo` is re-exported from `tldraw`, and `getDefaultUserPresence` (`@tldraw/tlschema`) is the default it layers on. Leave `presenceMode` at `atom('full')` — see below.
 - **Sync server (authoritative room, persistence):** `TLSocketRoom` — `server/node_modules/@tldraw/sync-core/dist-cjs/index.d.ts` (the `TLSocketRoom` class; check its constructor options and the on-change / snapshot hooks the server uses to persist the `.tldr`).
-- **Server-injected per-agent cursors (the fragile part, SPEC §7):** one `TLSocketRoom` client broadcasts **exactly one** presence record and replicates only **document-scoped** diffs, so writing N `instance_presence` records into a store does **not** propagate to human peers. The supported path is **N presence-only sync clients**, one per session: `TLSyncClient` (`@tldraw/sync-core`'s `dist-cjs/index.d.ts` under the server's `node_modules`) takes `presence: Signal<null | R>` and `presenceMode?: Signal<TLPresenceMode>` (verified `:1514`–`:1515`); `presenceMode` **must** be `atom('full')` or post-connect presence updates silently drop. The working implementation is `server/presence.ts` (`PresenceManager`) — read it before touching cursor injection.
+- **Server-injected per-agent cursors (the fragile part, SPEC §7):** one `TLSocketRoom` client broadcasts **exactly one** presence record and replicates only **document-scoped** diffs, so writing N `instance_presence` records into a store does **not** propagate to human peers. The supported path is **N presence-only sync clients**, one per session: `TLSyncClient` (`server/node_modules/@tldraw/sync-core/dist-cjs/index.d.ts`) takes `presence: Signal<null | R>` and `presenceMode?: Signal<TLPresenceMode>` (verified `:1514`–`:1515`); `presenceMode` **must** be `atom('full')` or post-connect presence updates silently drop. The working implementation is `server/presence.ts` (`PresenceManager`) — read it before touching cursor injection.
 - **Presence records (a named, colored agent cursor):** `TLInstancePresence` / `InstancePresenceRecordType` — `app/node_modules/@tldraw/tlschema/dist-cjs/index.d.ts` (the `instance_presence` record: `userName`, cursor position, etc.).
 - **Docs:** `https://tldraw.dev/docs/sync` (WebFetch) for the sync model and self-hosting; cross-check anything version-sensitive against the installed types, since the site tracks latest.
 

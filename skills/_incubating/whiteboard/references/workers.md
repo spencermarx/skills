@@ -1,103 +1,136 @@
-# Workers: spawning, addressing, reviving
+# Workers: spawning, addressing and reviving them
 
-When one Send splits into independent pieces ("flesh out each box into a
-subsystem"), or the operator asks for it, the lead spawns worker subagents so
-several cursors draw at once. Each worker is a subagent the lead tracks to
-completion, never a detached process: detached workers die at the end of the run
-and orphan their work. The single-agent case is just "lead, zero workers". A
-harness without subagents never spawns workers; the lead does the pieces one
-after another.
+Read by the lead before it spawns the first worker, on every `revive` item (§ Revival), and
+when it acts for a worker after a compaction; and by each worker at spawn. A worker
+is a tracked subagent that draws on the same board as its own cursor and takes Sends from
+its own queue. The lead's own loop is [`SKILL.md`](../SKILL.md) §2; the design is
+[`SPEC.md`](../SPEC.md) §4, §8.5 and decisions #33 to #45.
+
+## The brief each worker gets
+
+The worker did not load the skill, so its spawn prompt carries everything it needs to
+start. Hand each worker:
+
+- **its `clientKey`**, which is also its recipient id, for example `worker-2`, and a display
+  name no other agent on the board uses, such as `Claude-2`, which a replacement keeps;
+- **the bridge URL**, `http://127.0.0.1:<port>`, with the `<port>` you captured at boot;
+- **its region**: the shapes or area it owns, disjoint from every other agent's;
+- **what to read**: `<skill dir>/references/workers.md` § Worker loop, then
+  `<skill dir>/SKILL.md` §2 steps (b) to (g), the read-act turn, and
+  `<skill dir>/references/tldraw-editor-api.md`, the write API step (d) uses. Write
+  `<skill dir>` as the absolute path `${CLAUDE_SKILL_DIR}` expands to in your session.
+
+Keep the agent id or name the spawn returns. That is how you address the worker with
+`SendMessage`; its bridge `sessionId` is not, and it can change on revival.
+
+## Spawning
+
+Spawn workers when one Send splits into independent pieces ("flesh out each box into a
+subsystem"), or when the operator asks. Each is a **tracked** subagent, never detached: a
+detached one dies at run end and orphans its work. One lead and zero workers is the ordinary
+case.
+
+**Disjoint regions are a convention, not a lock.** The operator can aim Sends at workers
+independently, so the operator keeps the convention as much as you do. Two agents on the
+same shapes can clobber each other; `meta.lastEditedBy` keeps a clobber visible. `/exec`
+calls are serialized on the one Editor, so concurrent writes never corrupt the store.
 
 ## Addressing
 
-The panel's Send box carries a **recipient**: the lead (the default), a named
-worker (by its recipient id), or `everyone` (a broadcast to all workers). The
-recipient routes the Send; the lead supervises lifecycle and does not relay
-human input to workers.
+The panel's recipient box aims a Send at the lead (the default), a named worker, or
+`everyone` (all workers). The recipient routes the Send straight to that agent's queue; the
+lead never relays operator input to workers. **Typing a new name does not create a worker.**
+The bridge accepts `lead` or a `clientKey` that has registered on this board at least once (kept
+after the worker dies and across a restart of the board, so a Send can wait for it), and answers
+`400` for any other `recipient` on
+`/message` or `for` on `/next-instruction` and `/instruction-complete`. `everyone` is a
+broadcast keyword, never a valid `for`. A guest session (registered with `guest: true`) is
+never a recipient: a Send to it gets a `400` (`recipient is a guest session`), and it is
+never revived or included in a broadcast. A guest and a worker never share a key, because
+the key's prefix says which it is: a guest's must start `guest-` and a worker's must not. A
+worker registering on a `guest-` key gets a `400`
+(`only a guest's clientKey may start with "guest-"`), so key workers `worker-N`.
 
-The operator can address only workers the lead has already spawned. The panel
-lists them from the `agents` array on `GET /canvas-status`, and the bridge
-returns `400` for an unknown recipient (`recipient` on `/message`, `for` on
-`/next-instruction` and `/instruction-complete`). A valid id is `lead` or a
-worker `clientKey` that has registered at least once; it stays valid after the
-worker dies, so a Send can wait for a dead worker. `everyone` is the broadcast
-keyword, not an id, and is never a valid `for`.
+## Worker loop
 
-## Spawning a worker
+1. **Register** with your own key and transcript path (resolved as in SKILL.md §1 step 6):
+   `POST /session/register {"name":"Claude-2","clientKey":"worker-2","transcriptPath":"<path>"}`
+   returns your `sessionId` and gives you a cursor. The `clientKey` is stable across death
+   and revival, so routing keys on it; re-registering on it keeps one cursor, in the same color.
+2. **Self-park on your own queue**, in the foreground, carrying your `sessionId`, which the
+   bridge requires: without it the fetch is a `400`, and with a `sessionId` that is not
+   registered as your `clientKey` it is a `403`. Neither hands you anything.
+   ```bash
+   curl --max-time 250 "http://127.0.0.1:<port>/next-instruction?for=<your clientKey>&sessionId=<sid>"
+   ```
+   It returns `{ instruction, selection, id, at, for, broadcast?, refetch? }`. Your backlog
+   comes first, oldest first, so a Send held while you were absent returns at once; the
+   poll blocks only when the queue is empty. `refetch: true` marks a Send your key was
+   served before and never completed: you, or a worker before you, may have drawn part of
+   it, and [`interrupted-work.md`](interrupted-work.md) § A Send marked `refetch: true` says
+   how to finish it, by your display name.
+3. **Run the read-act turn**, SKILL.md §2 steps (b) to (g), on that Send, in your own region.
+   Every bridge call carrying your `sessionId` renews your lease on the Send.
+4. **Complete** with `POST /instruction-complete { id, for:"<your clientKey>", sessionId:"<sid>" }`.
+   `sessionId` is required. `for` may be left out: it defaults to the key your `sessionId`
+   registered on. A `for` naming no recipient of this board is a `400`. On an `everyone`
+   broadcast, `broadcast:true` in the payload is the reminder that you complete only your own
+   copy: another agent's key in `for` gets a `403`. Off a broadcast a valid `for` changes
+   nothing, and completing another agent's Send gets a `403`. Neither `403` completes anything.
+5. **Re-arm.** A `204` is a re-arm, not an exit: poll your own queue again.
+6. **On a `403` saying your `sessionId` is not registered, re-register and carry on.** That
+   `403`, from `/next-instruction` or `/instruction-complete`, most often means the bridge
+   restarted. Repeat step 1 with the same `clientKey` and name, then retry the call that
+   failed with the `sessionId` it returns. Your queue is intact: a Send that waited across the
+   restart is the first one served. A `403` saying your `sessionId` is registered as your key,
+   not another, is not a lost registration, and re-registering returns the same `sessionId`:
+   the `for` you passed, or the Send you completed, is not yours. Take and complete only your
+   own.
 
-For each worker:
+Wait only on your own queue: `/next-instruction` answers `400` for `for=lead`, no `for`, or a
+key never registered on this board, and `403` for another agent's key. The doorbell rings
+only the lead, never a worker.
 
-1. It registers its own session with a stable `clientKey` that **is** its
-   recipient id: `POST /session/register {name, clientKey, transcriptPath}` (for
-   example `{"name":"Agent-2","clientKey":"worker-2"}`) → its own `{sessionId}`
-   and cursor. The same string is what a Send is addressed to and what it polls
-   for. It is stable across death and revival (a revived or replacement worker
-   re-registers with the same key), so routing keys on it, never on the
-   `sessionId`, which changes on revival. Registration is idempotent on the key.
-2. The lead assigns it a **disjoint region or subtree**: workers never edit the
-   same shapes. Because the operator can aim workers directly, the operator must
-   keep to this too. It is a convention, not a lock; a clobber stays visible
-   through authorship (`meta.lastEditedBy`).
-3. It draws on the shared render-canvas with `POST /exec {code, sessionId,
-   idempotencyKey}`, carrying its own `sessionId` so its cursor is attributed.
-   `/exec` calls are serialised on the one editor, so concurrent writes never
-   corrupt the store.
+## Revival
 
-Give the worker, in its prompt: the bridge URL, its `clientKey`, its region, and
-the read-act turn (SKILL.md, the loop's steps (b) to (g)).
+A subagent's lifetime is finite (`maxTurns`, autocompaction), so a parked worker can die
+with a Send waiting. The Send is not lost: it waits in that worker's queue, and the lead
+gets a `revive` item on `/pending`,
+`{ kind:"revive", revive:"<recipientId>", name?, nudge }`: that worker has a pending Send and
+no live self-park. SKILL.md §2(a) sends the lead here on every revive item, so a compaction
+that drops this file loses nothing.
 
-## The worker loop: self-park on its own queue
+**What the lead does with a `revive` item, in the turn it arrives:**
 
-A worker does not wait for the lead to feed it. After registering, it long-polls
-its **own** queue in the foreground, carrying its `sessionId` (the heartbeat that
-renews its lease):
+1. `SendMessage` that worker, addressed by the agent id or name the spawn returned (never
+   its bridge `sessionId`), with the item's `nudge` exactly as served. Never compose or
+   paraphrase a nudge: it carries no Send text, and the worker pulls its own queue.
+2. If the worker cannot be messaged, count your live subagents first (§ Scale), then spawn a
+   replacement for the same `clientKey`, `name` and region with the brief in § The brief each
+   worker gets, and end its prompt with the `nudge` exactly as served.
 
-```bash
-curl --max-time 250 "http://127.0.0.1:<port>/next-instruction?for=<its id>&sessionId=<sid>"
-```
+The server raises a revive only for a worker that holds no live lease on any of its pending
+Sends and has made no bridge call for about 30 s, so a worker that is drawing, or waiting on
+its own critic subagent, is never revived. After a revive, the same worker is not raised
+again for 60 s while it comes back, and a revived worker keeps its cursor color.
 
-The payload is `{ instruction, selection, id, at, for, broadcast? }`. The worker:
+**Relay served text, never composed text.** The `nudge` is keyed on the worker's
+`clientKey` alone (its bridge URL, its key, "drain your queue") and is identical on every
+revival whatever is pending. Test any nudge by asking whether its text varies with the
+instruction; it cannot. The nudge carries no Send text, and the revived worker drains its
+own queue with `GET /next-instruction`. A fresh-spawned replacement gets the same brief
+(above), display name included, so its stamps carry its predecessor's name; it registers
+on the same `clientKey`, which reclaims the routing key and the cursor,
+and gets the same `nudge`, exactly as served, at the end of its prompt. The brief is fixed
+text, so the replacement still receives no Send text.
 
-- drains its backlog oldest-first: the first poll returns any Send held for it
-  while it was absent, and blocks only once the queue is empty;
-- runs the same read-act turn as the lead, steps (b) to (g);
-- acks with `POST /instruction-complete { id, for: "<its id>" }`. Passing `for` is
-  mandatory: it completes its own copy, and for a broadcast `broadcast:true` in
-  the payload is the reminder;
-- treats a `204` as a re-arm, never an exit, and polls again.
-
-A worker waits only on its own queue, never the lead's, and never with
-`supervise=1`. Workers do **not** use the background poller: only the lead talks
-to the operator in the terminal, so only the lead needs to listen while
-interacting.
-
-If a worker goes silent past the lease window mid-draw (a crash, a hang), the
-bridge reclaims the Send on that worker's queue and redelivers it: at once to a
-parked session for that recipient, or else it shows the worker as **stalled**,
-which the lead's supervisor poll turns into a revive directive.
-
-## The revival nudge
-
-A subagent's life is finite (compaction, turn limits), so a parked worker can die
-with work still on its queue. That Send is not lost. The lead's supervisor poll
-returns `{ revive: "<id>", name?: "<worker name>", nudge: "<text>" }`, and in
-**that woken turn** (never from inside a park) the lead:
-
-- relays the directive's `nudge` text to worker `<id>` **verbatim**. The lead never
-  writes or paraphrases a nudge. The bridge builds it from the recipient id alone
-  (its URL, its `clientKey`, "drain your queue"), so it is identical on every
-  revival and carries no instruction content: the queue stays the single source
-  of truth, and the revived worker drains it itself;
-- if the worker cannot be messaged, spawns a replacement subagent with the
-  **same** `clientKey` and primes it with the same nudge.
-
-How to message a running subagent differs by harness: see `harness-notes.md`.
-All coordination goes through the bridge, never agent to agent: the lead is the
-only agent that nudges a worker, and the Send, the worker's turn and the
-completion all travel over the per-recipient queues.
+All coordination goes through the bridge. Worker-to-worker messaging is unconfirmed, so the
+lead is the only agent that nudges a worker.
 
 ## Scale
 
-Design for 5 concurrent workers. The hard cap is your harness's limit on live
-subagents (`harness-notes.md` gives Claude Code's). Count live subagents before
-you revive one.
+Design for 5 concurrent workers. The hard cap is the runtime's 20 concurrent subagents
+(`CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`). Resuming a completed subagent takes a fresh slot
+without re-checking the cap, so spawn, complete and revive churn can push the live count
+above what you expect: count before you revive, and never assume a completed worker freed its
+slot.

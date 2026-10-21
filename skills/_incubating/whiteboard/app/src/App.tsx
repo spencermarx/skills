@@ -32,6 +32,7 @@ import {
   fetchBoards,
   fetchCanvasStatus,
   fetchMessages,
+  HttpError,
   newBoard,
   openBoard,
   postMessage,
@@ -40,6 +41,7 @@ import {
   readRole,
   readRoom,
   readSession,
+  roomForBoard,
   syncUrl,
   uploadImage,
   wsUrl,
@@ -104,12 +106,22 @@ type LogLine = {
   text: string
   ts: number
   mine: boolean
-  // [v5.1, SPEC §8.2] Server-authoritative Send lifecycle on the operator's own lines
-  // (queued → working → done, or stalled if a lead's lease expired). Undefined on agent lines.
+  // [v5.1, SPEC §8.2] Server-authoritative Send lifecycle on the operator's own lines. A lead
+  // Send: queued → rung → fetched → done, or not-heard (#64); a worker Send: queued → working →
+  // done, or stalled. Undefined on agent lines.
   state?: SendState
   // [v6, SPEC §4/§8.2] The Send's routing target, so the log line can show its addressee
   // ("You → Claude-2:"). Absent / kind 'lead' == the lead default (rendered clean as "You:").
   recipient?: Recipient
+  // [v9.11 #64] Client-only delivery state of the operator's optimistic echo, until the server's
+  // copy arrives under the same id (which clears it): `sending` (its POST is the one in flight),
+  // `waiting` (in the outbound queue behind a POST that has not failed), `unsent` (held in the
+  // queue after a POST to the board failed, until a retry or a reconnect sends it), or `failed`
+  // (a 4xx, `localStatus` its code: never retried). It overrides `state`, which a server-less
+  // echo never has. `selection` is the Send's original selection.
+  local?: 'sending' | 'waiting' | 'unsent' | 'failed'
+  localStatus?: number
+  selection?: string[]
 }
 
 // [v6, SPEC §4] The addressee shown alongside the author on a human Send: a worker's
@@ -125,33 +137,73 @@ function addresseeLabel(line: LogLine): string | null {
 
 // [v5.1, SPEC §8.2] The lifecycle badge for one log line, or null when the line is not
 // one of the operator's own Sends. The panel renders the server's `state` directly.
-// queued (awaiting a lead) → working (a lead is drawing it) → done. [v9.3] `stalled` is a
-// WORKER-only state now: a lead's liveness is leadAlive-driven, not a lease, so a lead line
-// never carries stalled — the guard below renders any such stray state as queued for the lead.
+// [v9.11 #64] A lead Send is per item: queued (no ring yet) → rung (the doorbell reached the
+// session) → fetched (Claude pulled it; shown as "working") → done, or not heard (the re-rings
+// ran out, or no ring could reach the session). A worker Send keeps queued → working → done, or
+// stalled when its lease expired.
 function lifecycleLabel(line: LogLine): { text: string; cls: string } | null {
   if (!line.mine || line.kind !== 'human') return null
+  // [v9.11 #64] A Send the server never stored reads as what it is, not as "queued".
+  // "queued" is said only once the server has stored the Send: the in-flight POST reads "sending",
+  // a Send behind a POST that has not failed reads "waiting to send", and only a Send held after a
+  // failed POST reads "not sent".
+  if (line.local === 'sending') return { text: 'sending', cls: 'queued' }
+  if (line.local === 'waiting') return { text: 'waiting to send', cls: 'waiting' }
+  if (line.local === 'unsent') return { text: 'not sent: sends when the board is back', cls: 'stalled' }
+  if (line.local === 'failed') return { text: `not sent (${line.localStatus ?? 'error'})`, cls: 'failed' }
   switch (line.state) {
     case 'done':
       return { text: 'done', cls: 'done' }
     case 'working':
+    case 'fetched':
       return { text: 'working', cls: 'working' }
-    case 'stalled': {
-      // [v9.3] Workers still stall; a LEAD never does (its liveness is leadAlive-driven, not a
-      // lease sweep). A lead-addressed line must never render a stalled badge even if a stale
-      // frame carried the state — fall it through to queued. Absent / kind 'lead' == the lead.
-      const isLead = !line.recipient || line.recipient.kind === 'lead'
-      return isLead ? { text: 'queued', cls: 'queued' } : { text: 'stalled', cls: 'stalled' }
-    }
+    case 'rung':
+      return { text: 'rung', cls: 'queued' }
+    case 'not-heard':
+      return { text: 'not heard', cls: 'stalled' }
+    case 'stalled':
+      return { text: 'stalled', cls: 'stalled' }
     default:
       return { text: 'queued', cls: 'queued' }
   }
 }
 
-// [v5.1] A Send is "waiting for a lead" — the state that lights the no-agent banner when
-// no lead is parked. `working` (being drawn) and `done` never do.
-function needsLead(line: LogLine): boolean {
+// Every state a `message-state` frame may carry; anything else is dropped as malformed.
+const SEND_STATES = new Set<SendState>(['queued', 'rung', 'fetched', 'not-heard', 'working', 'stalled', 'done'])
+
+// [v9.11 #64] A Send nobody has heard: a lead Send the doorbell could not get fetched, or a
+// worker Send whose worker is absent or stalled. The first is decided by the server per item; the
+// second by the roster below.
+function notHeard(line: LogLine): boolean {
+  return line.mine && line.kind === 'human' && line.state === 'not-heard'
+}
+function waitingOnWorker(line: LogLine): boolean {
+  // [v9.11 #64] A Send the server has not stored (sending, unsent or failed) is waiting on the
+  // board, not on a worker.
+  if (line.local !== undefined) return false
   return line.mine && line.kind === 'human' && (line.state === 'queued' || line.state === 'stalled' || line.state === undefined)
 }
+
+// [v9.11 #64] A 4xx is a refusal: the board answered and will not take this request, so it is
+// never retried. Anything else (a 5xx, a network error, the bridge's POST timeout) means the board
+// is unreachable for now, and the request waits in the outbound queue.
+function isRefusal(err: unknown): err is HttpError {
+  return err instanceof HttpError && err.status >= 400 && err.status < 500
+}
+
+// [v9.11 #64] One entry in the panel's outbound queue: an operator Send, or the close control's
+// teardown request. The entry carries the request exactly as it will be POSTed; the Send's
+// operator-facing state stays on its log line.
+type Outbound =
+  | { kind: 'send'; id: string; text: string; selection: string[]; recipient?: Recipient }
+  | { kind: 'teardown' }
+
+// [v9.11 #64] The panel's retry while connected: the wait before each successive attempt after a
+// drain stops with the events socket open. The last delay repeats until a POST succeeds.
+const RETRY_DELAYS_MS = [2_000, 5_000, 10_000]
+
+// [v9.11 #64] How long the notice for a refused board switch stays up unless dismissed.
+const BOARD_ERROR_MS = 10_000
 
 // A fresh id, doubling as a message idempotencyKey (SPEC §4).
 function newId(): string {
@@ -196,6 +248,10 @@ const SESSION = readSession()
 // /exec is serialized server-side (SPEC §4), the create/change handlers read an
 // unambiguous author. `null` between blobs → the agent surface skips stamping.
 let currentExecAuthor: AuthorIdentity | null = null
+// The latest exec to start on this canvas. The bridge reloads the canvas to end a blob it stopped
+// waiting for (runExec), so none should outlive its answer; if one does, its `finally` must not clear
+// the next exec's author.
+let latestExec = 0
 
 // [v5] The operator's identity on the human surface, resolved once from the URL.
 const HUMAN_AUTHOR: AuthorIdentity = (() => {
@@ -217,7 +273,7 @@ function resolveAuthor(): AuthorIdentity | null {
 function coerceAuthor(raw: unknown): AuthorIdentity | null {
   if (!raw || typeof raw !== 'object') return null
   const o = raw as Record<string, unknown>
-  const name = typeof o.name === 'string' && o.name ? o.name : 'Agent'
+  const name = typeof o.name === 'string' && o.name ? o.name : 'Claude'
   const a: AuthorIdentity = { kind: o.kind === 'human' ? 'human' : 'agent', name }
   if (typeof o.sessionId === 'string') a.sessionId = o.sessionId
   if (typeof o.color === 'string') a.color = o.color
@@ -238,7 +294,7 @@ function coerceAgentStatus(raw: unknown): AgentStatus | null {
   const role = o.role === 'worker' ? 'worker' : 'lead'
   const life = o.lifecycle
   const lifecycle =
-    life === 'queued' || life === 'working' || life === 'stalled' || life === 'absent' || life === 'idle'
+    life === 'queued' || life === 'working' || life === 'stalled' || life === 'not-heard' || life === 'absent' || life === 'idle'
       ? life
       : 'idle'
   return {
@@ -250,6 +306,8 @@ function coerceAgentStatus(raw: unknown): AgentStatus | null {
     // [redesign] Identity color (SEAM): pass the server hex through when present; an empty
     // string falls back to a deterministic per-identity color in `agentColor`.
     color: typeof o.color === 'string' ? o.color : '',
+    // [v9.11 #64, SPEC #33] Carried only when true, so a non-guest entry stays byte-identical.
+    ...(o.guest === true ? { guest: true } : {}),
   }
 }
 
@@ -339,7 +397,7 @@ function avatarLabel(name: string): string {
 // one glanceable state. Rendered as a colored corner dot (see .wb-av-dot-* in App.css).
 function avatarState(a: AgentStatus): 'listening' | 'active' | 'stalled' | 'absent' | 'idle' {
   if (a.lifecycle === 'absent') return 'absent'
-  if (a.lifecycle === 'stalled') return 'stalled'
+  if (a.lifecycle === 'stalled' || a.lifecycle === 'not-heard') return 'stalled'
   if (a.lifecycle === 'working' || a.lifecycle === 'queued') return 'active'
   return a.parked ? 'listening' : 'idle'
 }
@@ -455,7 +513,8 @@ function validateExecShapes(
   }
 }
 
-// Patch the agent render-canvas's shape-write methods to validate-first. createShape and
+// Patch the agent render-canvas's shape-write methods to validate-first, and to refuse a create onto
+// an id that exists. createShape and
 // updateShape both delegate to these plurals internally, so wrapping the two covers all
 // four. Returns a disposer that restores the original methods.
 function installExecShapeGuard(editor: Editor): () => void {
@@ -466,7 +525,17 @@ function installExecShapeGuard(editor: Editor): () => void {
   const origCreate = target.createShapes.bind(editor)
   const origUpdate = target.updateShapes.bind(editor)
   target.createShapes = (shapes: unknown[]) => {
-    validateExecShapes(editor, Array.isArray(shapes) ? shapes : [], 'createRecord')
+    const list = Array.isArray(shapes) ? shapes : []
+    // tldraw's createShapes on an id that exists replaces that shape whole (store.put): props not
+    // passed reset, and the shape another draw or the operator made is overwritten with ok:true.
+    // Refuse it, so an id collision is an error the agent sees, never a silent overwrite.
+    for (const s of list) {
+      const id = s && typeof s === 'object' ? (s as { id?: unknown }).id : undefined
+      if (typeof id === 'string' && editor.getShape(id as TLShapeId)) {
+        throw new Error(`createShapes: ${id} already exists; change it with updateShapes`)
+      }
+    }
+    validateExecShapes(editor, list, 'createRecord')
     return origCreate(shapes)
   }
   target.updateShapes = (partials: unknown[]) => {
@@ -477,6 +546,13 @@ function installExecShapeGuard(editor: Editor): () => void {
     target.createShapes = origCreate
     target.updateShapes = origUpdate
   }
+}
+
+// [#67] The SHA-256 digest of a string's UTF-8 bytes, in hex: how recovery's harvest sends an asset's
+// inline data. The bridge computes the same with node:crypto to compare it with the room's copy.
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('')
 }
 
 function App() {
@@ -514,6 +590,9 @@ function App() {
   useEffect(() => {
     if (syncOnline || !wasEverOnline.current) {
       setShowDisconnected(false)
+      // [v9.11 #64] A board that closed because its session ended comes back on the same port
+      // when the session reopens it; once sync is back, the closing notice no longer holds.
+      if (syncOnline) setServerClosing(false)
       return
     }
     const timer = setTimeout(() => setShowDisconnected(true), 2500)
@@ -536,11 +615,39 @@ function App() {
   const [boards, setBoards] = useState<BoardEntry[]>([])
   const [wsConnected, setWsConnected] = useState(false)
   const logRef = useRef<HTMLDivElement | null>(null)
+  // [v9.11 #64] The latest log, readable from the outbound queue's drainer (to skip a Send whose
+  // stored copy has already arrived) without re-running the socket effect. A mirror of `log`, not a
+  // second store.
+  const logLinesRef = useRef<LogLine[]>(log)
+  useEffect(() => {
+    logLinesRef.current = log
+  })
 
   // [redesign] The board switcher is a button that opens a popover (Miro/tldraw pattern),
   // replacing the always-open scrolling board list. Local UI state only.
   const [boardMenuOpen, setBoardMenuOpen] = useState(false)
   const boardMenuRef = useRef<HTMLDivElement | null>(null)
+  // [v9.11 #64] Why the last board switch did not happen, shown as a transient notice under the
+  // switcher. Set when /board/open or /board/new fails, cleared by the next switch attempt, by
+  // dismissing it, or after BOARD_ERROR_MS.
+  const [boardError, setBoardError] = useState<string | null>(null)
+  const boardErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const clearBoardError = useCallback(() => {
+    if (boardErrorTimerRef.current) clearTimeout(boardErrorTimerRef.current)
+    boardErrorTimerRef.current = null
+    setBoardError(null)
+  }, [])
+  const showBoardError = useCallback((message: string) => {
+    if (boardErrorTimerRef.current) clearTimeout(boardErrorTimerRef.current)
+    setBoardError(message)
+    boardErrorTimerRef.current = setTimeout(() => {
+      boardErrorTimerRef.current = null
+      setBoardError(null)
+    }, BOARD_ERROR_MS)
+  }, [])
+  useEffect(() => () => {
+    if (boardErrorTimerRef.current) clearTimeout(boardErrorTimerRef.current)
+  }, [])
 
   // [v9.1, SPEC §8.2/§8.4, decision #53] The operator's confirm-gated close-session affordance.
   // `closeArm` is the two-step confirm (the control expands to Confirm/Cancel in-app — never a
@@ -560,17 +667,6 @@ function App() {
   const [serverClosing, setServerClosing] = useState(false)
   const [showDisconnected, setShowDisconnected] = useState(false)
 
-  // [v5, SPEC §8.6/decision #29] Whether a lead is parked (long-polling). `null`
-  // until the first /canvas-status or `parked` frame — unknown, so the no-agent
-  // banner stays hidden until we actually know nobody is listening.
-  const [agentParked, setAgentParked] = useState<boolean | null>(null)
-  // [v9.3, SPEC §7] Server-computed lead liveness: true while the lead is alive/listening
-  // (bridged THROUGH the wake→re-arm gap by the server's grace window), false only when the
-  // lead is CONFIRMED dead (grace elapsed), `null` until first known. This is the "session
-  // ended" signal now, NOT transient `agentParked === false` (which drops on every normal turn
-  // when poll.sh tears down to wake the agent). Seeded from `/canvas-status`, kept live by the
-  // `lead-alive` WS frame — mirrors `agentParked` exactly (same three-valued discipline).
-  const [leadAlive, setLeadAlive] = useState<boolean | null>(null)
   // [v6, SPEC §7, SEAM §7/§10] The live per-agent roster: the recipient selector's worker
   // list and the status strip both read it. Seeded from `/canvas-status` on load/reconnect,
   // kept current by the `agent-status` WS frame. `rosterLoadedRef` gates the recipient
@@ -617,7 +713,7 @@ function App() {
   }, [panelOpen])
 
   // Specialize the browser-tab title to the bound CC session's semantic name so each
-  // session's tab is distinguishable ("Whiteboard: my-repo: whiteboard session 10"),
+  // session's tab is distinguishable ("Whiteboard: aclarify: whiteboard experience 10"),
   // truncated to keep the tab legible. SESSION is fixed for the life of the page (a
   // board switch is a full navigation via gotoRoom/gotoBoardAt, which reloads and
   // re-resolves it), so this runs once; index.html keeps the plain "Whiteboard" as the
@@ -651,23 +747,6 @@ function App() {
     }
   }, [])
 
-  // [v9.1, #53] Confirm step of the close-session control: post the distinct teardown-request
-  // control signal (not a chat Send), latch the optimistic "closing…" state, and close the
-  // popover. On a POST failure, drop back out of "closing…" so the operator can retry rather than
-  // be stranded — the room-wide `teardownRequested` flag would still resurface it on next refresh
-  // if the request actually landed. The LEAD performs the graceful /done; this only signals it.
-  const onConfirmClose = useCallback(async () => {
-    setCloseArm(false)
-    setBoardMenuOpen(false)
-    setClosing(true)
-    try {
-      await requestTeardown(ROOM)
-    } catch (err) {
-      console.error('request teardown failed', err)
-      setClosing(false)
-    }
-  }, [])
-
   // [v6, SEAM §10] Fall back to the lead when the selected worker is gone from the roster.
   // Gated on `rosterLoadedRef` so a persisted worker id is NOT reset in the gap before the
   // first roster arrives (which would otherwise clobber the restore on a fresh reload). An
@@ -676,7 +755,7 @@ function App() {
   useEffect(() => {
     if (recipientId === LEAD_ID || recipientId === EVERYONE_ID) return
     if (!rosterLoadedRef.current) return
-    if (!agents.some((a) => a.role === 'worker' && a.id === recipientId)) {
+    if (!agents.some((a) => a.role === 'worker' && !a.guest && a.id === recipientId)) {
       onRecipientChange(LEAD_ID)
     }
   }, [agents, recipientId, onRecipientChange])
@@ -747,6 +826,10 @@ function App() {
           ts: line.ts,
           mine: cur.mine || line.mine,
           state: state ?? cur.state,
+          // [v9.11 #64] A repeat id is the server's stored copy: the Send reached it, so any
+          // client-only delivery state (sending / unsent / failed) no longer holds.
+          local: undefined,
+          localStatus: undefined,
         }
         const next = prev.slice()
         next[idx] = merged
@@ -772,7 +855,8 @@ function App() {
       if (idx === -1) return prev
       const next = prev.slice()
       const cur = next[idx]
-      next[idx] = { ...cur, state, recipient: cur.recipient ?? recipient }
+      // [v9.11 #64] A lifecycle frame proves the server stored this Send; clear any local state.
+      next[idx] = { ...cur, state, recipient: cur.recipient ?? recipient, local: undefined, localStatus: undefined }
       return next
     })
   }, [])
@@ -783,10 +867,179 @@ function App() {
     const lines = msgs
       .map((m) => toLine(m, m.author.kind === 'human' && myIds.current.has(m.id)))
       .sort((a, b) => a.ts - b.ts)
-    seenIds.current = new Set(lines.map((l) => l.id))
+    const serverIds = new Set(lines.map((l) => l.id))
+    // [v9.11 #64] Server truth replaces local state, except an echo the server has not stored
+    // yet (still sending, unsent or failed): it is the operator's only record of that Send.
+    const isHeld = (l: LogLine) => l.local !== undefined && !serverIds.has(l.id)
+    seenIds.current = new Set([...serverIds, ...logLinesRef.current.filter(isHeld).map((l) => l.id)])
     lastSeenTs.current = lines.reduce((max, l) => Math.max(max, l.ts), 0)
-    setLog(lines)
+    setLog((prev) => [...lines, ...prev.filter(isHeld)].sort((a, b) => a.ts - b.ts))
   }, [])
+
+  // [v9.11 #64] Settle the client-only delivery state of one of the operator's echoes after its
+  // POST resolves. Applies only while the line still holds a local state: once the server's copy
+  // has arrived (ingest / a lifecycle frame cleared it), a late result from an earlier attempt
+  // must not paint a stored Send as unsent.
+  const settleSend = useCallback((id: string, patch: Pick<LogLine, 'local' | 'localStatus'>) => {
+    setLog((prev) => {
+      const idx = prev.findIndex((l) => l.id === id)
+      if (idx === -1 || prev[idx].local === undefined) return prev
+      const next = prev.slice()
+      next[idx] = { ...prev[idx], ...patch }
+      return next
+    })
+  }, [])
+
+  // [v9.11 #64] The outbound queue: every operator Send, and the close control's teardown request,
+  // in the order the operator made them. The server orders the lead's work by when each POST
+  // arrives, so only one POST is ever in flight, and a held Send can never be overtaken by a later
+  // one or by the teardown. A ref, not state: the drainer must read and shift it synchronously, a
+  // just-typed Send has to be in it before the next render, and the teardown request has no log
+  // line to hang its place on. It holds the order and the request bodies only; every Send's state
+  // (sending / unsent / failed) stays on its log line.
+  const outboxRef = useRef<Outbound[]>([])
+  // Exactly one drain runs at a time. A trigger that arrives mid-drain sets `drainAgainRef`: a drain
+  // that is posting picks the new entry up on its next pass anyway, and a drain that then stops on a
+  // failure runs once more, so a reconnect that lands while a hung POST is timing out is not lost.
+  const drainingRef = useRef(false)
+  const drainAgainRef = useRef(false)
+  // [v9.11 #64] Whether the queue is held by a POST that failed on something other than a 4xx. It
+  // decides how a held line reads: `unsent` once a POST has failed, `waiting` while the POST ahead
+  // of it has not. Cleared by `releaseHold` as soon as the queue moves past the entry that failed.
+  const stoppedRef = useRef(false)
+  // [v9.11 #64] The retry while connected. A drain that stops with the events socket still open
+  // (a timeout or a 5xx from a board that is up) gets no reconnect to wake it, so it schedules its
+  // own next attempt: 2 s, then 5 s, then every 10 s. At most one timer is pending, and a drain
+  // starting for any reason cancels it. A successful POST resets the backoff.
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const retryStepRef = useRef(0)
+  // The timer's way back into `drainOutbox`, which cannot name itself while it is being defined.
+  // A mirror of the callback, set after each render.
+  const drainOutboxRef = useRef<() => Promise<void>>(async () => {})
+  const cancelRetry = useCallback(() => {
+    if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
+    retryTimerRef.current = null
+  }, [])
+  // [v9.11 #64] The queue has moved past the entry whose failure held it: that entry posted, was
+  // refused (a 4xx), or was skipped because its stored copy had already arrived. Clear the hold,
+  // and every Send still queued reads `waiting` again rather than `unsent`. Run after each of
+  // those outcomes, so a queue that empties without a successful POST does not leave the next
+  // Send reading "not sent".
+  const releaseHold = useCallback(() => {
+    if (!stoppedRef.current) return
+    stoppedRef.current = false
+    for (const held of outboxRef.current) {
+      if (held.kind === 'send') settleSend(held.id, { local: 'waiting', localStatus: undefined })
+    }
+  }, [settleSend])
+
+  // [v9.11 #64] Post the queue head, await it, repeat. Run on a new Send, on the close control's
+  // confirm, on every events-socket (re)connect, and on the retry timer; a successful POST moves
+  // straight on to the next entry. A Send is re-POSTed under its original id, text, selection and recipient, and the
+  // server dedupes /message on the id, so a Send that did land (only its response was lost) is
+  // never stored twice.
+  // - Success: drop the entry. A Send's line clears its local state and reads "queued" from here,
+  //   because the server has stored it; its stored copy reconciles as usual. The backoff resets.
+  // - A 4xx: drop the entry and keep draining. A Send's line reads `failed`; a refused teardown
+  //   drops the panel out of "closing…" so the operator can try again.
+  // - A Send whose stored copy has already arrived: drop it unsent.
+  // Each of these three moves the queue past its head, so each runs `releaseHold`: lines held by
+  // an earlier failure read `waiting` again.
+  // - A network error, a 5xx or a timeout: stop. The entry stays at the head, and every Send line
+  //   still in the queue reads `unsent`, until the next trigger. If the events socket is still
+  //   open, no reconnect is coming, so the drain schedules the retry timer.
+  const drainOutbox = useCallback(async () => {
+    if (drainingRef.current) {
+      drainAgainRef.current = true
+      return
+    }
+    drainingRef.current = true
+    cancelRetry()
+    let stopped = false
+    try {
+      do {
+        drainAgainRef.current = false
+        stopped = false
+        const queue = outboxRef.current
+        while (queue.length > 0) {
+          const item = queue[0]
+          if (item.kind === 'send') {
+            // The stored copy already arrived (ingest cleared the local state): nothing to send.
+            const line = logLinesRef.current.find((l) => l.id === item.id)
+            if (line && line.local === undefined) {
+              queue.shift()
+              releaseHold()
+              continue
+            }
+            settleSend(item.id, { local: 'sending', localStatus: undefined })
+          }
+          try {
+            if (item.kind === 'send') await postMessage(item.text, item.selection, item.id, item.recipient)
+            else await requestTeardown(ROOM)
+          } catch (err) {
+            if (isRefusal(err)) {
+              queue.shift()
+              if (item.kind === 'send') {
+                console.error('send refused', err)
+                settleSend(item.id, { local: 'failed', localStatus: err.status })
+              } else {
+                console.error('request teardown refused', err)
+                setClosing(false)
+              }
+              releaseHold()
+              continue
+            }
+            console.error('board unreachable: holding the outbound queue', err)
+            stoppedRef.current = true
+            stopped = true
+            for (const held of queue) {
+              if (held.kind === 'send') settleSend(held.id, { local: 'unsent', localStatus: undefined })
+            }
+            break
+          }
+          queue.shift()
+          if (item.kind === 'send') settleSend(item.id, { local: undefined, localStatus: undefined })
+          retryStepRef.current = 0
+          releaseHold()
+        }
+      } while (drainAgainRef.current && outboxRef.current.length > 0)
+    } finally {
+      drainingRef.current = false
+    }
+    // The socket is open, so no reconnect will drain what is held: schedule the next attempt.
+    // `wsRef` is null once the panel unmounts, so a drain that settles after that schedules nothing.
+    if (stopped && outboxRef.current.length > 0 && wsRef.current?.readyState === WebSocket.OPEN) {
+      const delay = RETRY_DELAYS_MS[Math.min(retryStepRef.current, RETRY_DELAYS_MS.length - 1)]
+      retryStepRef.current += 1
+      cancelRetry()
+      retryTimerRef.current = setTimeout(() => {
+        retryTimerRef.current = null
+        void drainOutboxRef.current()
+      }, delay)
+    }
+  }, [settleSend, cancelRetry, releaseHold])
+  useEffect(() => {
+    drainOutboxRef.current = drainOutbox
+  })
+
+  // [v9.1, #53] Confirm step of the close-session control: queue the distinct teardown-request
+  // control signal (not a chat Send), latch the optimistic "closing…" state, and close the
+  // popover. The LEAD performs the graceful /done; this only signals it.
+  // [v9.11 #64] The request waits its turn in the outbound queue behind any Send still held, so
+  // the lead never gets the teardown before a Send the operator made first. While the board is
+  // unreachable the request stays queued and the panel stays "closing…", because it will be sent
+  // when the board is back. A refusal (4xx) drops back out of "closing…" so the operator can retry
+  // rather than be stranded; the room-wide `teardownRequested` flag would still resurface it on
+  // next refresh if the request actually landed. One teardown request is queued at most.
+  const onConfirmClose = useCallback(() => {
+    setCloseArm(false)
+    setBoardMenuOpen(false)
+    setClosing(true)
+    if (!outboxRef.current.some((item) => item.kind === 'teardown')) {
+      outboxRef.current.push({ kind: 'teardown' })
+    }
+    void drainOutbox()
+  }, [drainOutbox])
 
   const send = useCallback((frame: unknown) => {
     const ws = wsRef.current
@@ -882,6 +1135,12 @@ function App() {
           // touched between blobs is never mis-attributed. The stamping side-effect
           // (onMount) reads `currentExecAuthor` synchronously as each shape is made.
           currentExecAuthor = coerceAuthor(frame.author)
+          // Each exec starts at its own history mark, so one editor.undo() in a blob reverts the last exec
+          // that wrote, not every agent write since the canvas loaded. A blob that throws is not undone:
+          // what it wrote before the throw stays (tldraw may roll back an editor.run the throw escapes),
+          // and the bridge answers that it may have drawn (runExec).
+          const thisExec = ++latestExec
+          editor.markHistoryStoppingPoint('exec')
           try {
             const fn = AsyncFunction('editor', 'createShapeId', 'createBindingId', 'toRichText', code)
             const result = await fn(editor, createShapeId, createBindingId, toRichText)
@@ -895,7 +1154,7 @@ function App() {
           } catch (err) {
             send({ type: 'exec-result', id, ok: false, error: String(err) })
           } finally {
-            currentExecAuthor = null
+            if (thisExec === latestExec) currentExecAuthor = null // a later exec's author stays
           }
           // [render-cap] No spontaneous post-exec export here. The bridge's runExec
           // issues its OWN `export-image` request after the exec-result settles
@@ -916,7 +1175,7 @@ function App() {
         case 'agent-message': {
           const id = typeof frame.id === 'string' && frame.id ? frame.id : newId()
           const ts = typeof frame.ts === 'number' ? frame.ts : Date.now()
-          const name = typeof frame.name === 'string' && frame.name ? frame.name : 'Agent'
+          const name = typeof frame.name === 'string' && frame.name ? frame.name : 'Claude'
           ingest({ id, kind: 'agent', name, text: String(frame.text ?? ''), ts, mine: false })
           break
         }
@@ -935,20 +1194,8 @@ function App() {
         case 'message-state': {
           const id = typeof frame.id === 'string' ? frame.id : ''
           const state = frame.state as SendState | undefined
-          if (!id || (state !== 'queued' && state !== 'working' && state !== 'stalled' && state !== 'done')) break
+          if (!id || !state || !SEND_STATES.has(state)) break
           applyMessageState(id, state, coerceRecipient(frame.recipient))
-          break
-        }
-        // [v5, SPEC §8.6/decision #29] A lead parked or left; drives the LEAD-default banner.
-        case 'parked': {
-          if (typeof frame.agentParked === 'boolean') setAgentParked(frame.agentParked)
-          break
-        }
-        // [v9.3, SPEC §7] The lead's liveness changed. Analogous to `parked`, but this is the
-        // "session ended" signal: it stays true through the wake→re-arm gap and only goes false
-        // on confirmed death. Wired the SAME way as `parked`.
-        case 'lead-alive': {
-          if (typeof frame.leadAlive === 'boolean') setLeadAlive(frame.leadAlive)
           break
         }
         // [v6, SPEC §7, SEAM §4/§10] The per-agent roster changed; drives the recipient
@@ -979,7 +1226,10 @@ function App() {
             send({ type: 'shapes-result', id, ok: false, error: 'editor not ready' })
             break
           }
-          const shapes = editor.getCurrentPageShapes()
+          // [#67] An `ids` request is recovery asking for one asset whole: it carries that record and no
+          // page shapes, so the asset alone sets the answer's size.
+          const only = frame.records === true && Array.isArray(frame.ids)
+          const shapes = only ? [] : editor.getCurrentPageShapes()
           const page = editor.getCurrentPage()
           const camera = editor.getCamera()
           const selection = editor.getSelectedShapeIds()
@@ -989,11 +1239,48 @@ function App() {
           } catch {
             safeShapes = []
           }
+          // [#67] Recovery's harvest asks for every document record, on every page: the pages, assets,
+          // shapes and bindings a cut-off blob may have written. Perception never asks. With
+          // `digestAssets`, each asset's inline data (`props.src`, the image itself) goes as its SHA-256
+          // digest and the asset's id in `digested`, so the answer does not grow with the board's images;
+          // the bridge asks again with `ids` for any asset the room does not hold the same, and gets
+          // those records whole.
+          let records: unknown
+          let digested: string[] | undefined
+          if (frame.records === true) {
+            try {
+              type DocRecord = { id: string; typeName: string; props?: Record<string, unknown> }
+              const all = Object.values(editor.store.serialize('document')) as DocRecord[]
+              const ids = only ? new Set((frame.ids as unknown[]).map(String)) : null
+              const chosen = ids ? all.filter((r) => ids.has(r.id)) : all
+              if (frame.digestAssets === true && !ids && globalThis.crypto?.subtle) {
+                const out: DocRecord[] = []
+                digested = []
+                for (const r of chosen) {
+                  const src = r.typeName === 'asset' ? r.props?.src : undefined
+                  if (typeof src !== 'string') {
+                    out.push(r)
+                    continue
+                  }
+                  out.push({ ...r, props: { ...r.props, src: `sha256:${await sha256Hex(src)}` } })
+                  digested.push(r.id)
+                }
+                records = JSON.parse(JSON.stringify(out))
+              } else {
+                records = JSON.parse(JSON.stringify(chosen))
+              }
+            } catch {
+              records = undefined
+              digested = undefined
+            }
+          }
           send({
             type: 'shapes-result',
             id,
             ok: true,
             shapes: safeShapes,
+            ...(records === undefined ? {} : { records }),
+            ...(digested === undefined ? {} : { digested }),
             page: { id: page.id, name: page.name },
             camera: { x: camera.x, y: camera.y, z: camera.z },
             selection,
@@ -1002,14 +1289,13 @@ function App() {
         }
         // [v9.5, SPEC §5] Store-health probe for the server's honest-contract detection and
         // recovery (slice B/C). possiblyCorrupted is the load-bearing signal and is ALWAYS
-        // reachable from the store, even when the sync client is not, so it is read directly.
-        // window.tlsync is the raw @tldraw/sync client IF something has exposed it on window:
-        // @tldraw/sync's useSync does not expose it publicly (verified against 5.4.2), so it is
-        // normally absent here. When it is absent we fall back to the reachable useSync status
-        // wrapper for connectivity and report the client-only fields (speculativeAdded,
-        // lastServerClock) as empty. The server treats documentClock advance as the primary
-        // "reached room" signal and possiblyCorrupted as the corruption signal, so those two
-        // client-only fields are supplementary.
+        // reachable from the store, so it is read directly. window.tlsync is the raw
+        // @tldraw/sync client: useSync does not return it, but @tldraw/sync-core 5.4.2's
+        // TLSyncClient constructor sets window.tlsync to itself, so it is present on this canvas. Its lastServerClock is the room clock recovery's harvest has seen
+        // (#67), which keeps a peer's newer edit from being overwritten; sync-corruption Board B
+        // fails if tldraw stops exposing it. Without it, connectivity falls back to the useSync
+        // status wrapper and lastServerClock is reported as null, which the server reads as the
+        // room's current clock.
         case 'sync-health': {
           const id = String(frame.id ?? '')
           const possiblyCorrupted =
@@ -1052,21 +1338,14 @@ function App() {
     [ingest, applyMessageState, exportAndUpload, send],
   )
 
-  // [v5, SPEC §8.6] Seed / refresh `agentParked` from /canvas-status (human only).
-  // Called on mount and on every (re)connect; the live `parked` frame keeps it
-  // current between refreshes. A fetch failure leaves the flag untouched (unknown).
+  // [v6, SPEC §7] Seed / refresh the roster and the closing state from /canvas-status (human
+  // only). Called on mount and on every (re)connect; the live frames keep them current between
+  // refreshes. A fetch failure leaves them untouched.
   const refreshStatus = useCallback(async () => {
     if (ROLE !== 'human') return
     try {
       const status = await fetchCanvasStatus()
-      setAgentParked(status.agentParked)
-      // [v9.3, SPEC §7] Seed the lead-liveness signal. Read defensively (the bridge SEAM adds
-      // `leadAlive` to CanvasStatus; until that type lands we read it off the value): a boolean
-      // seeds true/false, anything else (a pre-v9.3 bridge that omits it) stays `null` = unknown,
-      // so an unresolved liveness never accuses — exactly like the `agentParked` null discipline.
-      const la = (status as { leadAlive?: boolean }).leadAlive
-      setLeadAlive(typeof la === 'boolean' ? la : null)
-      // [v6, SEAM §7/§10] Seed the roster too; `?? []` tolerates a pre-v6 bridge that omits it.
+      // [v6, SEAM §7/§10] Seed the roster; `?? []` tolerates a pre-v6 bridge that omits it.
       setAgents(coerceAgents(status.agents ?? []))
       rosterLoadedRef.current = true
       // [v9.1, #53] Reflect the room-wide teardown-requested flag as the "closing…" state; a
@@ -1088,9 +1367,12 @@ function App() {
       wsRef.current = ws
       ws.onopen = () => {
         setWsConnected(true)
-        // Re-seed the parked flag on every (re)connect so a change missed while the
-        // socket was down is corrected, not just the live frames from here on.
+        // Re-seed the roster on every (re)connect so a change missed while the socket was
+        // down is corrected, not just the live frames from here on.
         void refreshStatus()
+        // [v9.11 #64] The board is reachable again: drain what the operator Sent while it was not,
+        // in order, one POST at a time. Starting the drain cancels any pending retry timer.
+        if (ROLE === 'human') void drainOutbox()
         // On (re)connect, catch up on anything the panel missed while the socket
         // was down (SPEC §8.2), then stay live over the WS. The first full load
         // is done by its own effect; only reconnects fetch incrementally here.
@@ -1109,6 +1391,8 @@ function App() {
       }
       ws.onclose = () => {
         setWsConnected(false)
+        // [v9.11 #64] The retry while connected stops with the socket: the reconnect's `onopen` drains.
+        cancelRetry()
         if (!closed) reconnect = setTimeout(connect, 1000)
       }
       ws.onerror = () => ws.close()
@@ -1130,7 +1414,7 @@ function App() {
       wsRef.current?.close()
       wsRef.current = null
     }
-  }, [editorReady, handleFrame, ingest])
+  }, [editorReady, handleFrame, ingest, drainOutbox, cancelRetry])
 
   // ── load the board list on start (human surface only) ───────────────────────
   const refreshBoards = useCallback(async () => {
@@ -1229,6 +1513,18 @@ function App() {
     // Using the BEFORE handlers, which return the record to commit, means the meta
     // is set in the SAME write — no `editor.updateShape` second write, so no
     // re-entrancy and no recursion (invariant #3).
+    //
+    // Every shape id this client has held: present at mount, or created since from any source (a
+    // deleted id was one of those). A local create of an id outside it is a new shape, so it belongs
+    // to whoever made it, whatever stamps the record carries: tldraw's duplicate and paste copy a
+    // record whole, `meta` included, and the stamps are replaced while other `meta` keys stay. A local create of an id inside it is a restore (undo, redo,
+    // moveShapesToPage's delete and recreate) and keeps the stamps it carries.
+    const seenShapeIds = new Set<string>(
+      editor.store.allRecords().filter((r) => r.typeName === 'shape').map((r) => r.id),
+    )
+    const unseeCreate = editor.sideEffects.registerAfterCreateHandler('shape', (shape) => {
+      seenShapeIds.add(shape.id)
+    })
     const unstampCreate = editor.sideEffects.registerBeforeCreateHandler(
       'shape',
       (shape, source) => {
@@ -1236,21 +1532,33 @@ function App() {
         const author = resolveAuthor()
         if (!author) return shape
         const meta = { ...shape.meta }
-        // createdBy is immutable: only ever set when absent, never overwritten.
-        if (!meta.createdBy) meta.createdBy = authorStamp(author)
-        meta.lastEditedBy = authorStamp(author)
+        if (!seenShapeIds.has(shape.id)) {
+          meta.createdBy = authorStamp(author)
+          meta.lastEditedBy = authorStamp(author)
+        } else {
+          // A restore fills only a stamp it lacks; createdBy is immutable once stamped.
+          if (meta.createdBy && meta.lastEditedBy) return shape
+          if (!meta.createdBy) meta.createdBy = authorStamp(author)
+          if (!meta.lastEditedBy) meta.lastEditedBy = authorStamp(author)
+        }
         return { ...shape, meta }
       },
     )
     const unstampChange = editor.sideEffects.registerBeforeChangeHandler(
       'shape',
-      (_prev, next, source) => {
+      (prev, next, source) => {
         if (source !== 'user') return next
+        // createdBy is immutable: carry it across every local write, so one that rebuilds meta
+        // (a store.put of a whole record) cannot erase or replace it. No backfill: a shape with
+        // no createdBy keeps none (SPEC §8.6).
+        const createdBy = prev.meta.createdBy
         const author = resolveAuthor()
-        if (!author) return next
-        // Rewrite lastEditedBy on each local edit; never touch createdBy (immutable,
-        // and no backfill — a shape with no createdBy keeps none: SPEC §8.6).
-        return { ...next, meta: { ...next.meta, lastEditedBy: authorStamp(author) } }
+        if (!author && next.meta.createdBy === createdBy) return next
+        const meta = { ...next.meta }
+        if (createdBy === undefined) delete meta.createdBy
+        else meta.createdBy = createdBy
+        if (author) meta.lastEditedBy = authorStamp(author)
+        return { ...next, meta }
       },
     )
 
@@ -1262,6 +1570,7 @@ function App() {
 
     const dispose = () => {
       unlisten()
+      unseeCreate()
       unstampCreate()
       unstampChange()
       uninstallGuard?.()
@@ -1278,11 +1587,12 @@ function App() {
       const editor = editorRef.current as unknown as { _wbUnlisten?: () => void } | null
       editor?._wbUnlisten?.()
       if (diffTimer.current) clearTimeout(diffTimer.current)
+      cancelRetry()
     }
-  }, [])
+  }, [cancelRetry])
 
   // ── panel actions (human surface) ───────────────────────────────────────────
-  const onSend = useCallback(async () => {
+  const onSend = useCallback(() => {
     const editor = editorRef.current
     const trimmed = text.trim()
     if (!trimmed || !editor) return
@@ -1296,20 +1606,25 @@ function App() {
     // [v6, SEAM §2/§3] Resolve the chosen recipient once and stamp it on both the optimistic
     // echo (so the line shows its addressee immediately) and the POST (so the bridge routes it).
     const recipient = recipientFor(recipientId, agents)
-    ingest({ id, kind: 'human', name: 'You', text: trimmed, ts: Date.now(), mine: true, recipient })
+    // [v9.11 #64] The Send joins the back of the outbound queue, so it posts only after everything
+    // made before it. Its echo reads "sending" when the queue was empty (its POST starts now),
+    // `waiting` when an earlier Send or the teardown is ahead of it and no POST has failed, and
+    // `unsent` when the queue is held after a failed POST: never "queued" before the server has
+    // stored it. The text box still clears: the line in the log is the operator's
+    // record of the Send.
+    const sel = selection as unknown as string[]
+    const local = outboxRef.current.length === 0 ? 'sending' : stoppedRef.current ? 'unsent' : 'waiting'
+    ingest({ id, kind: 'human', name: 'You', text: trimmed, ts: Date.now(), mine: true, recipient, local, selection: sel })
     setText('')
-    try {
-      await postMessage(trimmed, selection as unknown as string[], id, recipient)
-    } catch (err) {
-      console.error('send failed', err)
-    }
-  }, [text, ingest, recipientId, agents])
+    outboxRef.current.push({ kind: 'send', id, text: trimmed, selection: sel, recipient })
+    void drainOutbox()
+  }, [text, ingest, drainOutbox, recipientId, agents])
 
   const onKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
         e.preventDefault()
-        void onSend()
+        onSend()
       }
     },
     [onSend],
@@ -1337,50 +1652,73 @@ function App() {
     location.assign(url.toString())
   }, [])
 
-  // Join the room the bridge names. A board it refused (one it cannot load) is never joined.
+  // [v9.11 #64] A switch is transactional on the server. A 200 means the server has moved to the
+  // board it names in `room` (or, with `attach`, that another live process hosts it), so the
+  // panel follows it. Any failure means nothing changed: the server answers 409 when the board is
+  // still being released or its owner does not answer, or [#65] while a server from before #64
+  // runs (its `error` names each one's pid, port and board, for the operator to have stopped), and
+  // 422 when the board would not load, in every case still on this board. The panel therefore stays where it is and shows the server's
+  // `error` text; a network error or a body with no `error` gets a generic line.
+  const failedSwitch = useCallback(
+    (what: string, err: unknown) => {
+      console.error(`${what} failed`, err)
+      const reason =
+        err instanceof HttpError
+          ? (err.serverError ?? `the board server answered ${err.status}`)
+          : 'the board server could not be reached'
+      showBoardError(`Could not ${what}: ${reason}. You are still on this board.`)
+    },
+    [showBoardError],
+  )
+
   const onOpenBoard = useCallback(
     async (entry: BoardEntry) => {
+      // Join the room the server names (its `room`), never a slug derived here: the sync guard
+      // refuses a room this process is not hosting.
+      clearBoardError()
+      let r
       try {
-        const r = await openBoard(entry.path)
-        // The board was already live on another process — attach there instead of same-port.
-        if (r.attach && r.port) { gotoBoardAt(r.port, r.room); return }
-        gotoRoom(r.room)
+        r = await openBoard(entry.path)
       } catch (err) {
-        console.error('open board failed', err)
-        window.alert(`Could not open ${entry.name}: ${(err as Error).message}`)
+        failedSwitch(`open '${entry.name}'`, err)
+        return
       }
+      // The board was already live on another process — attach there instead of same-port.
+      if (r.attach && r.port) { gotoBoardAt(r.port, r.room); return }
+      gotoRoom(r.room)
     },
-    [gotoRoom, gotoBoardAt],
+    [gotoRoom, gotoBoardAt, clearBoardError, failedSwitch],
   )
 
   const onNewBoard = useCallback(async () => {
     const name = window.prompt('New board name?')
     if (!name) return
+    clearBoardError()
+    let r
     try {
-      const r = await newBoard(name)
-      if (r.attach && r.port) { gotoBoardAt(r.port, r.room); return }
-      gotoRoom(r.room)
+      r = await newBoard(name)
     } catch (err) {
-      console.error('new board failed', err)
-      window.alert(`Could not create ${name}: ${(err as Error).message}`)
+      failedSwitch(`create '${name}'`, err)
+      return
     }
-  }, [gotoRoom, gotoBoardAt])
+    if (r.attach && r.port) { gotoBoardAt(r.port, r.room); return }
+    gotoRoom(r.room)
+  }, [gotoRoom, gotoBoardAt, clearBoardError, failedSwitch])
 
-  // [v6, SPEC §7, decisions #29/#32/#38] The loud "nobody's home" signal, now per recipient.
-  // Is the recipient a given waiting Send is addressed to NOT listening?
-  //   lead (default) — [v9.3] confirmed-dead only: leadAlive === false (an explicit false, never
-  //     the unknown null, so an unresolved liveness never accuses). NOT transient agentParked ===
-  //     false, which drops on every normal turn as poll.sh tears down to wake the agent; the
-  //     server holds leadAlive true across that wake→re-arm gap via its grace window.
+  // [v6, SPEC §7, decisions #29/#32/#38] The loud "nobody heard it" signal, per Send.
+  //   lead (default) — [v9.11 #64] decided by the server per item: a lead Send reads `not-heard`
+  //     once its re-rings ran out unfetched, or when no ring could reach the owning session.
   //   worker — honest per the agents strip: `absent` (dead / never-spawned) or `stalled` (held
   //     a lease then went silent). A present worker (idle / queued / working) is listening.
   //   broadcast — not listening if any targeted worker is absent/stalled, or there is no worker
   //     to hear it at all.
-  // A `working` Send is already excluded upstream by `needsLead`, so an active draw never trips it.
-  const workers = agents.filter((a) => a.role === 'worker')
-  const recipientNotListening = (line: LogLine): boolean => {
+  // [v9.11 #64, SPEC #33] A guest is never a recipient, so it is not a worker here: it is not
+  // tappable, it does not make Everyone appear, and it does not count toward a broadcast.
+  const workers = agents.filter((a) => a.role === 'worker' && !a.guest)
+  const guests = agents.filter((a) => a.guest)
+  const workerNotListening = (line: LogLine): boolean => {
     const r = line.recipient
-    if (!r || r.kind === 'lead') return leadAlive === false
+    if (!r || r.kind === 'lead') return false
     if (r.kind === 'broadcast') {
       return workers.length === 0 || workers.some((a) => a.lifecycle === 'absent' || a.lifecycle === 'stalled')
     }
@@ -1388,32 +1726,20 @@ function App() {
     if (!a) return false // an unknown worker id → don't accuse
     return a.lifecycle === 'absent' || a.lifecycle === 'stalled'
   }
-  const strandedSends = log.filter(needsLead).filter(recipientNotListening)
-  const noAgent = strandedSends.length > 0
-  const anyStalled = strandedSends.some((l) => l.state === 'stalled')
+  const unheardLeadSends = log.filter(notHeard)
+  const strandedWorkerSends = log.filter(waitingOnWorker).filter(workerNotListening)
+  const noAgent = unheardLeadSends.length > 0 || strandedWorkerSends.length > 0
+  const anyStalled = strandedWorkerSends.some((l) => l.state === 'stalled')
 
   // [redesign] The collaborators shown as a presence row and used as tap-to-address targets:
   // the Lead (always, synthesized before the roster arrives so there is always a target) plus
   // every worker. Only these real ids — plus EVERYONE_ID once a worker exists — are tappable,
   // so the panel can never select an unknown recipient id (the 400-safe roster contract).
   //
-  // [v9.3, SPEC §7, decision #47] The lead's listening state is driven by the server-computed
-  // `leadAlive` signal (kept live by the `lead-alive` WS frame), NOT by transient `agentParked`
-  // (which drops on every normal turn as poll.sh tears down to wake the agent) and NOT by a
-  // possibly-stale roster entry. `leadAlive` stays TRUE through the wake→re-arm gap (bridged by
-  // the server's grace window) and goes false only on CONFIRMED death, so a lead merely between
-  // turns — or mid-conversation with the operator — still reads present/listening. The
-  // reconciliation, three-valued exactly like the old agentParked force:
-  //   leadAlive === true  → listening: a resting 'idle'/'absent' lifecycle becomes 'idle',
-  //                         while genuine activity ('working'/'queued') is preserved. (A lead
-  //                         never carries 'stalled' post-v9.3 — its liveness is not a lease.)
-  //   leadAlive === false → CONFIRMED dead (§7): force 'absent' regardless of a stale roster
-  //                         lifecycle, so the avatar dims honestly.
-  //   leadAlive === null  → unknown: fall back to whatever the roster carries, never accuse.
-  // `agentParked` still sets the `parked` boolean (the little parked dot) when known, but no
-  // longer drives the lifecycle force.
-  const leadBase: AgentStatus =
-    agents.find((a) => a.role === 'lead') ?? {
+  // [v9.11 #64] The lead's row is the server's, read off its items (working / not-heard / queued
+  // / idle / absent); the panel renders it verbatim.
+  const leadEntry: AgentStatus =
+    agents.find((a) => a.role === 'lead' && !a.guest) ?? {
       id: LEAD_ID,
       name: 'Lead',
       role: 'lead',
@@ -1421,27 +1747,11 @@ function App() {
       lifecycle: 'idle',
       color: '', // agentColor falls the lead back to the product accent
     }
-  const leadEntry: AgentStatus = {
-    ...leadBase,
-    // The parked dot still reflects agentParked (transient) when known; unknown keeps the roster's.
-    parked: agentParked === null ? leadBase.parked : agentParked,
-    lifecycle:
-      leadAlive === false
-        ? 'absent'
-        : leadAlive === true
-          ? leadBase.lifecycle === 'absent'
-            ? 'idle'
-            : leadBase.lifecycle
-          : leadBase.lifecycle,
-  }
   const roster: AgentStatus[] = [leadEntry, ...workers]
 
   // [redesign] The current board's display name for the switcher trigger: the boards list entry
   // whose room matches the joined ROOM, else the ROOM slug itself.
-  const currentBoard = boards.find((b) => b.room === ROOM)
-  const currentBoardName = currentBoard?.name ?? ROOM
-  // What to type to reopen this board: its name for a board in the boards folder, else its path.
-  const resumeTarget = currentBoard ? (currentBoard.source === 'home' ? currentBoard.name : currentBoard.path) : ROOM
+  const currentBoardName = boards.find((b) => roomForBoard(b) === ROOM)?.name ?? ROOM
 
   // [v9.1, #53] The panel's "closing…" state: this browser's optimistic latch OR the room-wide
   // flag any browser reads from /canvas-status. It drives the calm closing notice and the
@@ -1507,7 +1817,7 @@ function App() {
             <span className="wb-disconnect-text">
               {serverClosing
                 ? 'This board is closing. Your changes are no longer being saved — export now if you have unsaved edits.'
-                : 'Disconnected from the board. Your changes are not being saved — export the board now, and don’t rely on further edits syncing.'}
+                : 'Disconnected from the board. Your changes are not being saved — export the board now, and don’t rely on further edits syncing. Messages you Send now are held and sent, in the order typed, when it reconnects.'}
             </span>
           </div>
         )}
@@ -1556,7 +1866,7 @@ function App() {
                 <ul className="wb-board-menu">
                   {boards.length === 0 && <li className="wb-menu-empty">No boards yet</li>}
                   {boards.map((b) => {
-                    const active = b.room === ROOM
+                    const active = roomForBoard(b) === ROOM
                     return (
                       <li key={b.path || b.name}>
                         <button
@@ -1597,7 +1907,7 @@ function App() {
                         <button
                           type="button"
                           className="wb-close-affirm"
-                          onClick={() => void onConfirmClose()}
+                          onClick={() => onConfirmClose()}
                         >
                           Confirm
                         </button>
@@ -1654,6 +1964,28 @@ function App() {
                 </button>
               )
             })}
+            {/* [v9.11 #64, SPEC #33] Guests show their presence (their cursor is injected
+                server-side as for anyone) but are not tappable: a Send to a guest is refused. */}
+            {guests.map((a) => {
+              const color = agentColor(a)
+              return (
+                <span
+                  key={a.id}
+                  className="wb-avatar is-guest"
+                  style={
+                    { '--wb-id-color': color, '--wb-on-id': discLabelColor(color) } as CSSProperties
+                  }
+                  aria-disabled="true"
+                  title={`${a.name} — guest · not addressable`}
+                >
+                  <span className="wb-av-figure">
+                    <span className="wb-av-disc">{avatarLabel(a.name)}</span>
+                    <span className={`wb-av-dot wb-av-dot-${avatarState(a)}`} aria-hidden="true" />
+                  </span>
+                  <span className="wb-av-name">{a.name}</span>
+                </span>
+              )
+            })}
             {workers.length > 0 && (
               <button
                 type="button"
@@ -1676,6 +2008,24 @@ function App() {
               <span className="wb-closing-text">
                 Closing the session. The collaborator will wrap up and disconnect.
               </span>
+            </div>
+          )}
+
+          {/* [v9.11 #64] Why the last board switch did not happen. Transient: it clears on the
+              next attempt, on dismiss, or after BOARD_ERROR_MS. */}
+          {boardError && (
+            <div className="wb-notice wb-notice-stalled" role="alert">
+              <span className="wb-notice-dot" aria-hidden="true" />
+              <span className="wb-notice-text">{boardError}</span>
+              <button
+                type="button"
+                className="wb-notice-dismiss"
+                onClick={clearBoardError}
+                aria-label="Dismiss"
+                title="Dismiss"
+              >
+                ×
+              </button>
             </div>
           )}
 
@@ -1718,15 +2068,17 @@ function App() {
             })}
           </div>
 
-          {/* A calm inline notice — not an alarm — when a Send is waiting for someone to join. */}
+          {/* A calm inline notice — not an alarm — when a Send has not been heard. */}
           {noAgent && (
-            <div className={anyStalled ? 'wb-notice wb-notice-stalled' : 'wb-notice'} role="status">
+            <div className={anyStalled || unheardLeadSends.length > 0 ? 'wb-notice wb-notice-stalled' : 'wb-notice'} role="status">
               <span className="wb-notice-dot" aria-hidden="true" />
               <span className="wb-notice-text">
-                {anyStalled
-                  ? 'A collaborator stepped away mid-task. Your message is re-queued and will be picked up when they are back.'
-                  : 'No one is on the board yet. Your message is queued and will be delivered when a collaborator joins.'}{' '}
-                Run <code>/whiteboard open {resumeTarget}</code> to resume.
+                {unheardLeadSends.length > 0
+                  ? 'Claude has not heard your message. It is kept and will be delivered when the session picks it up.'
+                  : anyStalled
+                    ? 'A collaborator stepped away mid-task. Your message is re-queued and will be picked up when they are back.'
+                    : 'No one is on the board yet. Your message is queued and will be delivered when a collaborator joins.'}{' '}
+                Run <code>/whiteboard open {ROOM}</code> to resume.
               </span>
             </div>
           )}
@@ -1758,7 +2110,7 @@ function App() {
               <button
                 type="button"
                 className="wb-send"
-                onClick={() => void onSend()}
+                onClick={() => onSend()}
                 disabled={!text.trim()}
               >
                 Send

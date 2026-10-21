@@ -70,7 +70,7 @@ export class MultiAgentPresence {
       agent = {
         id: InstancePresenceRecordType.createId(sessionId),
         userId: `claude-${sessionId}`,
-        name: frame.name || 'Agent',
+        name: frame.name || 'Claude',
         color: frame.color || PALETTE[this.agents.size % PALETTE.length],
         state: 'idle',
         cursor: { x: 0, y: 0 },

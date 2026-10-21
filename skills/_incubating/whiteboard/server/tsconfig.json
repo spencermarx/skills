@@ -14,10 +14,8 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
-    "allowJs": true,
-    "checkJs": true,
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["*.ts", "*.mjs"]
+  "include": ["*.ts"]
 }
