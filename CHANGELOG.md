@@ -1,5 +1,17 @@
 # aclarify-skills
 
+## 0.3.0
+
+### Minor Changes
+
+- [#3](https://github.com/spencermarx/skills/pull/3) [`e681a61`](https://github.com/spencermarx/skills/commit/e681a61125ae00280870de055611a2911cba7f5f) Thanks [@spencermarx](https://github.com/spencermarx)! - `whiteboard` (incubating) is re-ported from its upstream doorbell redesign. The lead no longer runs a background poller. In Claude Code the board's server is the foreground of a background job and stops when the session ends. It rings the session's inbox when you Send, the lead fetches `GET /pending`, and a canary at boot proves the ring arrives. In harnesses without an inbox, the server runs detached until you close the board, and the lead listens by long-polling `GET /pending?wait=`. Boards keep their port across reopens. Each Send shows whether the lead has fetched it ("rung", "working", "not heard"). The panel holds and retries Sends the board did not receive. The boot and listening steps changed: `whiteboard.sh start` runs the server in the foreground, `start --detach` runs it detached, and exit 3 now means the board is held by a live server and exit 5 that the runtime is not installed. Room ids are now the board's file name.
+
+### Patch Changes
+
+- [#5](https://github.com/spencermarx/skills/pull/5) [`ebd52f7`](https://github.com/spencermarx/skills/commit/ebd52f70aae24f1f6ab112db5a4fcc269145a7b0) Thanks [@spencermarx](https://github.com/spencermarx)! - The README is rebuilt around the skills: a new 1-bit wordmark for light and dark themes, install routes per harness, a "Start here" table, skills that work together, and a catalog that links every skill to its folder and marks the ones that start only when you type them.
+
+- [#6](https://github.com/spencermarx/skills/pull/6) [`903b0a8`](https://github.com/spencermarx/skills/commit/903b0a8ebdaa578b8d702e26712b672593f348a0) Thanks [@spencermarx](https://github.com/spencermarx)! - `whiteboard` (incubating): a recovery whose time ran out no longer begins a reload with a millisecond left and then reports "the canvas was reloaded". Its waits now end no earlier than their deadline by the clock the deadline is measured in, so the panel says the recovery's time ran out.
+
 ## 0.2.0
 
 ### Minor Changes
