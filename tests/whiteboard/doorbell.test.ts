@@ -7,26 +7,34 @@
 // always drops a body identical to one it saw inside its dedup window, as the real inbox does.
 // Exit 0 = all pass.
 //
-//   node --import tsx doorbell.test.ts      (run from server/)
+//   node --import tsx tests/whiteboard/doorbell.test.ts      (run from the skill's server/)
 //
-// Two test-only children run beside it, each through tsx from server/: doorbell.stale-socket.ts
-// (a socket file with no listener) and doorbell.old-server.ts (a server from before #64).
+// Two test-only children beside it run through tsx from the skill's server/: doorbell.stale-socket.ts
+// (a socket file with no listener) and doorbell.old-server.ts (a server from before #64). Every board
+// lives in this suite's own throwaway repository.
 
 import { spawn, spawnSync, type ChildProcess, type ChildProcessByStdio } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import net, { type AddressInfo } from 'node:net';
 import http from 'node:http';
 import type { Readable } from 'node:stream';
-import { WebSocket } from 'ws';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import type { TLSyncClient as SyncClient } from '@tldraw/sync-core';
 import type { Store as TLStore } from '@tldraw/store';
 import type { TLGeoShape, TLParentId, TLRecord, TLShapeId, TLStoreProps } from '@tldraw/tlschema';
+import { CANVAS_KEY, SERVER_DIR, sandbox } from './harness.mjs';
 
-const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const SERVER_DIR = path.join(SKILL_DIR, 'server');
+// This suite lives outside the skill, in tests/whiteboard/: the server and its packages come from
+// the skill's server/, its two test-only children sit beside it, and every board lives in its own
+// throwaway repository.
+const serverRequire = createRequire(path.join(SERVER_DIR, 'package.json'));
+const { WebSocket } = serverRequire('ws') as typeof import('ws');
+type WebSocket = import('ws').WebSocket;
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 // --- the shapes this suite reads back ----------------------------------------
 // A board server spawned by `boot`: its combined stdout and stderr, and the port it prints.
@@ -65,6 +73,7 @@ interface CanaryResponse { ok?: boolean; rung?: boolean }
 interface BoardOpenResponse { room?: string }
 interface DoorbellStatus {
   inbox: boolean;
+  mode?: 'inbox' | 'pull';
   rings: number;
   lastRingOk: boolean | null;
   lastRingError?: string;
@@ -108,17 +117,9 @@ interface PortRecord { port: number; pid: number; board: string }
 interface SnapshotDocument { state: { id: string; name?: string }; lastChangedClock?: number }
 interface Snapshot { documentClock?: number; documents: SnapshotDocument[] }
 
-function repoRoot(start: string): string {
-  let dir = start;
-  for (;;) {
-    if (fs.existsSync(path.join(dir, '.git'))) return dir;
-    const up = path.dirname(dir);
-    if (up === dir) return start;
-    dir = up;
-  }
-}
-const HOME = path.join(repoRoot(SKILL_DIR), '.scratchpad', 'whiteboard');
-fs.mkdirSync(HOME, { recursive: true });
+// This suite's own throwaway repository (WHITEBOARD_REPO); HOME is its boards folder.
+const SB = sandbox('doorbell');
+const HOME: string = SB.home;
 
 const PEND = 'wbbell_pending'; // GET /pending: order, receipt, never parks, lead-only
 const RING = 'wbbell_ring'; // ring text, coalescing, re-ring, `pending` on bridge responses, token hygiene
@@ -181,12 +182,13 @@ g.window ??= { addEventListener() {}, removeEventListener() {}, devicePixelRatio
 g.document ??= { addEventListener() {}, removeEventListener() {}, hidden: false, visibilityState: 'visible' };
 g.requestAnimationFrame ??= (cb: (t: number) => void) => setTimeout(() => cb(Date.now()), 16);
 g.cancelAnimationFrame ??= (id: unknown) => clearTimeout(id as ReturnType<typeof setTimeout>);
-const { Store } = await import('@tldraw/store');
-const { createTLSchema } = await import('@tldraw/tlschema');
-const { TLSyncClient } = await import('@tldraw/sync-core');
-// The published typings omit ClientWebSocketAdapter; client-adapter.ts types the same runtime export.
-const { ClientWebSocketAdapter } = await import('./client-adapter.js');
-const { atom } = await import('@tldraw/state');
+const { Store } = serverRequire('@tldraw/store') as typeof import('@tldraw/store');
+const { createTLSchema } = serverRequire('@tldraw/tlschema') as typeof import('@tldraw/tlschema');
+const { TLSyncClient } = serverRequire('@tldraw/sync-core') as typeof import('@tldraw/sync-core');
+// The published typings omit ClientWebSocketAdapter; the server's client-adapter.ts types the same
+// runtime export.
+const { ClientWebSocketAdapter } = serverRequire('@tldraw/sync-core') as unknown as typeof import('../../skills/_incubating/whiteboard/server/client-adapter.js');
+const { atom } = serverRequire('@tldraw/state') as typeof import('@tldraw/state');
 
 // Fast doorbell timings for every ringing board: re-ring at +600/+1200/+1800 ms after the first
 // ring, not heard 600 ms after the last re-ring (2.4 s), a 100 ms tick and a 150 ms minimum gap.
@@ -278,7 +280,7 @@ function fakeInbox(file: string, { mode = 'accept', dedupMs = 30_000 }: { mode?:
 // the file is never unlinked.
 function staleSocket(file: string): string {
   fs.rmSync(file, { force: true });
-  spawnSync(process.execPath, ['--import', 'tsx', path.join(SERVER_DIR, 'doorbell.stale-socket.ts'), file], { cwd: SERVER_DIR });
+  spawnSync(process.execPath, ['--import', 'tsx', path.join(HERE, 'doorbell.stale-socket.ts'), file], { cwd: SERVER_DIR });
   return file;
 }
 
@@ -305,11 +307,12 @@ function eq<T>(actual: T, expected: NoInfer<T>, msg: string): void {
 
 // The test process's environment minus the session inbox variables and the session's identity: a
 // board spawned from here must never inherit a real session's socket or token, nor record the real
-// session (CLAUDE_CODE_SESSION_ID, CLAUDE_JOB_DIR) or its process (CLAUDE_PID) as its owner.
+// session (CLAUDE_CODE_SESSION_ID, CLAUDE_JOB_DIR) or its process (CLAUDE_PID) as its owner, nor
+// read an exported PORT. It boots in this suite's repository, with the suite's render-canvas key.
 function scrubbedEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  for (const k of ['CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_PID', 'CLAUDE_JOB_DIR']) delete env[k];
-  return env;
+  for (const k of ['CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_PID', 'CLAUDE_JOB_DIR', 'PORT']) delete env[k];
+  return { ...env, ...SB.env, WHITEBOARD_CANVAS_KEY: CANVAS_KEY };
 }
 
 // Boot a bridge the way the skill does: node with the tsx loader in-process, no npm, no tsx CLI.
@@ -578,6 +581,7 @@ async function ringSection() {
     const status = await j<CanvasStatus>(port, '/canvas-status');
     ok(!JSON.stringify(status).includes(TOKEN), 'the token is not exposed on /canvas-status');
     eq(status.doorbell.inbox, true, '/canvas-status reports the inbox as configured');
+    eq(status.doorbell.mode, 'inbox', "/canvas-status reports the doorbell's mode as inbox");
     ok(status.doorbell.rings >= 7 && status.doorbell.lastRingOk === true, '/canvas-status reports the ring count and the last ring outcome');
   } finally {
     srv.kill('SIGTERM');
@@ -675,15 +679,19 @@ async function goneSection() {
 }
 
 async function noInboxSection() {
-  console.log('\n[no-inbox] a board with no inbox in its environment says so on every lead Send');
-  const srv = boot(NONE, FAST_BELL);
+  console.log('\n[no-inbox] a board with no inbox in its environment is in pull mode: a lead Send not pulled within the grace reads not-heard');
+  const srv = boot(NONE, { ...FAST_BELL, WHITEBOARD_PULL_GRACE_MS: '1500' });
   const port = await srv._port;
   try {
     await post<RegisterResponse>(port, '/session/register', { name: 'Claude', clientKey: 'lead' });
     await post(port, '/message', { text: 'no doorbell', idempotencyKey: 'n1' });
-    ok(await waitFor(async () => (await stateOf(port, 'n1')) === 'not-heard'), 'with no inbox socket the Send reads not-heard');
-    eq((await rowOf(port, 'n1'))!.notHeardReason, 'no-inbox', 'the record says why: no-inbox');
-    eq((await j<CanvasStatus>(port, '/canvas-status')).doorbell.inbox, false, '/canvas-status reports no inbox configured');
+    await sleep(300);
+    eq(await stateOf(port, 'n1'), 'queued', 'within the pull grace after the lead registers, the Send reads queued, not not-heard');
+    ok(await waitFor(async () => (await stateOf(port, 'n1')) === 'not-heard', 5000), 'once the grace passes with no pull, the Send reads not-heard');
+    eq((await rowOf(port, 'n1'))!.notHeardReason, 'not-listening', 'the record says why: not-listening');
+    const doorbell = (await j<CanvasStatus>(port, '/canvas-status')).doorbell;
+    eq(doorbell.inbox, false, '/canvas-status reports no inbox configured');
+    eq(doorbell.mode, 'pull', "/canvas-status reports the doorbell's mode as pull");
   } finally {
     srv.kill('SIGTERM');
     await sleep(800);
@@ -788,6 +796,8 @@ async function ownerSection() {
     const againPort = await again._port;
     eq(againPort, port, 'a reboot with no WHITEBOARD_PORT binds the recorded port');
     ok(await waitFor(() => /\(recorded port\)/.test(again._log)), 'and says it took the recorded port');
+    // The record is written after listen, so the log line can come first.
+    await waitFor(() => readJson<PortRecord>(portPath)?.pid === again.pid);
     eq(readJson<PortRecord>(portPath)?.pid, again.pid, 'the new owner rewrites the record under its own pid');
     // [#64 B1] Only the operator's /done forgets the port.
     ok(fs.existsSync(portPath), 'the port record exists before /done');
@@ -857,7 +867,7 @@ async function raceSection() {
   const p1 = await s1._port;
   let s2: BootedServer | null = null;
   // A render canvas that never answers: the exec holds S1's queue until its timeout.
-  const silent = new WebSocket(`ws://127.0.0.1:${p1}/events?role=agent`, { origin: `http://127.0.0.1:${p1}` });
+  const silent = new WebSocket(`ws://127.0.0.1:${p1}/events?role=agent&canvasKey=${CANVAS_KEY}`, { origin: `http://127.0.0.1:${p1}` });
   try {
     await new Promise<void>((resolve, reject) => { silent.on('open', () => resolve()); silent.on('error', reject); });
     const exec = postRaw(p1, '/exec', { code: 'return 1' });
@@ -1013,10 +1023,26 @@ async function emptyBoardSection() {
     child.stderr.on('data', (d) => { log += d.toString(); });
     const exited = await waitFor(() => child.exitCode !== null, 10000);
     if (!exited) child.kill('SIGKILL');
-    eq(child.exitCode, 1, `${what}: the server exits 1 at boot`);
+    eq(child.exitCode, 2, `${what}: the server refuses the board at boot (exit 2)`);
     ok(log.includes(`[bridge] WHITEBOARD_BOARD must be the board's absolute .tldr path (got ${value})`), `${what}: and names the value it refused`);
     ok(!/WHITEBOARD_PORT=/.test(log), `${what}: it never listened`);
   }
+  // [port] A board outside both the repository and the boards folder is refused too, before anything is
+  // created, naming why.
+  const outsideDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'wbbell-outside-')));
+  const outside = path.join(outsideDir, `${ELSEWHERE}.tldr`);
+  {
+    const child = spawn(process.execPath, ['--import', 'tsx', 'index.ts'], { cwd: SERVER_DIR, env: { ...scrubbedEnv(), WHITEBOARD_NO_CANVAS: '1', WHITEBOARD_BOARD: outside }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let log = '';
+    child.stdout.on('data', (d) => { log += d.toString(); });
+    child.stderr.on('data', (d) => { log += d.toString(); });
+    if (!(await waitFor(() => child.exitCode !== null, 10000))) child.kill('SIGKILL');
+    eq(child.exitCode, 2, 'a board outside the repository and the boards folder: the server refuses it at boot (exit 2)');
+    ok(log.includes('outside the repository'), `and says it is outside the repository (${log.trim().split('\n').at(-1)})`);
+    ok(!/WHITEBOARD_PORT=/.test(log), 'it never listened');
+    eq(fs.readdirSync(outsideDir).length, 0, 'and created nothing beside the refused board');
+  }
+  fs.rmSync(outsideDir, { recursive: true, force: true });
   const strays = fs.readdirSync(SERVER_DIR).filter((f) => f.startsWith('<') || f.startsWith(ELSEWHERE));
   eq(strays.length, 0, 'no board file was created beside the server');
   for (const f of strays) fs.rmSync(path.join(SERVER_DIR, f), { recursive: true, force: true });
@@ -1655,7 +1681,7 @@ async function shutdownDuringReleaseSection() {
 // it left in memory with no lock. The fake is a live node process (doorbell.old-server.ts) answering `/canvas-status` the way
 // a pre-#64 server does (`activeRoom`, no `pid`), behind a lock with `pid` and `port` and no `parentPid`.
 function fakeOldServer(answer: object | null): OldServerChild {
-  const child = spawn(process.execPath, ['--import', 'tsx', path.join(SERVER_DIR, 'doorbell.old-server.ts')], {
+  const child = spawn(process.execPath, ['--import', 'tsx', path.join(HERE, 'doorbell.old-server.ts')], {
     cwd: SERVER_DIR,
     env: { ...process.env, DOORBELL_OLD_ANSWER: JSON.stringify(answer) },
     stdio: ['ignore', 'pipe', 'ignore'],
@@ -1671,7 +1697,7 @@ async function pre64Section() {
   console.log('\n[pre64] a live server from before #64 on any board refuses a boot (exit 4) and the boot claims nothing');
   const lockOf = (board: string): string => path.join(HOME, `${board}.lock`);
   const oldLock = (board: string, pid: number | undefined, port: number, extra: Partial<LockRecord> = {}): void => fs.writeFileSync(lockOf(board), JSON.stringify({ port, pid, board, startedAt: Date.now(), ...extra }));
-  const line = (pid: number | undefined, port: number, board: string): string => `[bridge] board server from before #64 running: pid ${pid} on port ${port}, board '${board}'; not starting a server while one runs`;
+  const line = (pid: number | undefined, port: number, board: string): string => `[bridge] an older whiteboard server (no parentPid) is running: pid ${pid} on port ${port}, board '${board}'; not starting a server while one runs`;
   const claimedNothing = () => !fs.existsSync(lockOf(PRE)) && !fs.existsSync(path.join(HOME, `${PRE}.port`)) && !fs.existsSync(path.join(HOME, `${PRE}.tldr`));
   const old = fakeOldServer({ activeRoom: PREOLD, connected: true });
   const same = fakeOldServer({ activeRoom: PRE, connected: true }); // one serving the booted board
@@ -1728,7 +1754,7 @@ async function pre64Section() {
     oldLock(PREOLD, old.pid, oldPort);
     oldLock(PREOLD2, silent.pid, silentPort);
     const c = await refusedBoot('two pre-#64 servers, one of them not answering');
-    const named = c._log.split('\n').filter((l) => l.startsWith('[bridge] board server from before #64 running:'));
+    const named = c._log.split('\n').filter((l) => l.startsWith('[bridge] an older whiteboard server (no parentPid) is running:'));
     ok(named.length === 1 && named[0]!.includes(`pid ${old.pid} on port ${oldPort}, board '${PREOLD}'`) && named[0]!.includes(`pid ${silent.pid} on port ${silentPort}, board '${PREOLD2}'`), 'one line names both');
     ok(claimedNothing(), 'and the boot claimed nothing');
     fs.rmSync(lockOf(PREOLD2), { force: true });
@@ -1771,7 +1797,7 @@ async function pre64SwitchSection() {
   try {
     ok(await waitFor(() => readLock(lockOf(PRESWX))?.pid === host.pid), 'the host holds X');
     fs.writeFileSync(lockOf(PREOLD), JSON.stringify({ port: oldPort, pid: old.pid, board: PREOLD, startedAt: Date.now() }));
-    const named = `board server from before #64 running: pid ${old.pid} on port ${oldPort}, board '${PREOLD}'; stop it before switching boards`;
+    const named = `an older whiteboard server (no parentPid) is running: pid ${old.pid} on port ${oldPort}, board '${PREOLD}'; stop it before switching boards`;
     const yPath = path.join(HOME, `${PRESWY}.tldr`);
     const switches: [string, string, object][] = [['/board/open', '/board/open', { path: yPath }], ['/board/new', '/board/new', { name: PRESWY }]];
     for (const [what, route, body] of switches) {

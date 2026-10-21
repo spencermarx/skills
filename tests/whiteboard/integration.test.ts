@@ -4,33 +4,27 @@
 // GET /messages read model + since= filter, per-board isolation, and lockfile
 // lifecycle over real HTTP. No Chromium, no browser. Exit 0 = all pass.
 //
-//   node --import tsx integration.test.ts      (run from server/)
+//   node --import tsx tests/whiteboard/integration.test.ts      (run from the skill's server/)
 
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
-import { fileURLToPath } from 'node:url';
+import { CANVAS_KEY, SERVER_DIR, sandbox } from './harness.mjs';
 
-const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const SERVER_DIR = path.join(SKILL_DIR, 'server');
+// This suite lives outside the skill, in tests/whiteboard/: the server comes from the skill's
+// server/, and every board from this suite's own throwaway repository.
+// No suite server may ring a real session's inbox, take its identity, or read an exported PORT.
+const SCRUBBED_ENV = { CLAUDE_CODE_MESSAGING_SOCKET: undefined, CLAUDE_CODE_MESSAGING_TOKEN: undefined,
+  CLAUDE_CODE_SESSION_ID: undefined, CLAUDE_PID: undefined, CLAUDE_JOB_DIR: undefined, PORT: undefined };
 // Boot the server the way the skill does (node with the tsx loader in-process, no tsx CLI
 // wrapper), so the spawned child IS the server and killing it never orphans a board.
 const BOOT_ARGS = ['--import', 'tsx', 'index.ts'];
 
-// Mirror the server's repo-root walk to locate HOME = <root>/.scratchpad/whiteboard.
-function repoRoot(start: string): string {
-  let dir = start;
-  for (;;) {
-    if (fs.existsSync(path.join(dir, '.git'))) return dir;
-    const up = path.dirname(dir);
-    if (up === dir) return start;
-    dir = up;
-  }
-}
-const HOME = path.join(repoRoot(SKILL_DIR), '.scratchpad', 'whiteboard');
-fs.mkdirSync(HOME, { recursive: true });
+// This suite's own throwaway repository (WHITEBOARD_REPO); HOME is its boards folder.
+const SB = sandbox('integration');
+const HOME: string = SB.home;
 
 const A = 'wbtest_a';
 const B = 'wbtest_b';
@@ -70,8 +64,7 @@ function boot(board: string, extraEnv: Record<string, string> = {}): Server {
   const boardPath = path.join(HOME, `${board}.tldr`);
   const child = spawn(process.execPath, BOOT_ARGS, {
     cwd: SERVER_DIR,
-    env: { ...process.env, CLAUDE_CODE_MESSAGING_SOCKET: undefined, CLAUDE_CODE_MESSAGING_TOKEN: undefined,
-    CLAUDE_CODE_SESSION_ID: undefined, CLAUDE_PID: undefined, CLAUDE_JOB_DIR: undefined, WHITEBOARD_NO_CANVAS: '1', WHITEBOARD_BOARD: boardPath, ...extraEnv },
+    env: { ...process.env, ...SCRUBBED_ENV, ...SB.env, WHITEBOARD_CANVAS_KEY: CANVAS_KEY, WHITEBOARD_NO_CANVAS: '1', WHITEBOARD_BOARD: boardPath, ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const port = new Promise<number>((resolve, reject) => {
@@ -278,7 +271,8 @@ async function main() {
 
   // ---- [v9.11 #64] the lead's roster row follows its items, never a listener ----
   console.log('\n[v9.11 lead-status] the lead row reads absent → idle → not-heard → working → idle with its items');
-  const srvD = boot(D);
+  // In pull mode (no inbox socket) a Send reads not-heard once the lead has not pulled within the grace.
+  const srvD = boot(D, { WHITEBOARD_PULL_GRACE_MS: '300' });
   const portD = await srvD._port;
   const leadRow = async () => (await j<CanvasStatus>(portD, '/canvas-status')).agents.find((a) => a.id === 'lead')!;
   ok(typeof (await j<CanvasStatus>(portD, '/canvas-status')).doorbell === 'object', '/canvas-status reports the doorbell');
@@ -287,8 +281,8 @@ async function main() {
   eq((await leadRow()).lifecycle, 'idle', 'a registered lead with nothing pending reads idle');
   eq((await leadRow()).parked, false, 'the lead is never parked (it does not long-poll)');
   await post(portD, '/message', { text: 'no doorbell here', idempotencyKey: 'd1' });
-  await sleep(1300); // the doorbell tick marks it: this test board has no inbox socket
-  eq((await leadRow()).lifecycle, 'not-heard', 'a Send no ring can reach makes the lead row read not-heard');
+  await sleep(1300); // the doorbell tick marks it: this test board has no inbox socket, and no pull came
+  eq((await leadRow()).lifecycle, 'not-heard', 'a Send no ring reaches and no pull takes makes the lead row read not-heard');
   await j(portD, `/pending?sessionId=${dSid}`);
   eq((await leadRow()).lifecycle, 'working', 'a fetched, uncompleted Send makes the lead row read working');
   await post(portD, '/instruction-complete', { id: 'd1', sessionId: dSid });

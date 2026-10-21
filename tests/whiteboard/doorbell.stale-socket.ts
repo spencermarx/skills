@@ -2,7 +2,7 @@
 // behind it, as a killed session does. It listens on the path given as its one argument, then
 // SIGKILLs itself, so the file is never unlinked and connecting to it is ECONNREFUSED.
 //
-//   node --import tsx doorbell.stale-socket.ts <socket path>      (run from server/)
+//   node --import tsx doorbell.stale-socket.ts <socket path>      (run from the skill's server/)
 
 import net from 'node:net';
 

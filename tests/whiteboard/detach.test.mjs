@@ -1,25 +1,31 @@
-// `whiteboard.sh start --detach`, as a harness's tool call runs it: from a caller in a process group
-// of its own. Needs the full runtime (the script refuses to start without it), so it skips where
-// the runtime is not installed, as in CI; the render-canvas is skipped (WHITEBOARD_NO_CANVAS).
+// A board server's lifetime: bound to its parent (the Claude Code boot), or detached (every other
+// harness). The render-canvas is skipped (WHITEBOARD_NO_CANVAS).
 //
-//   1. The server outlives its caller's process group: it runs in a session of its own, and a
-//      TERM and then a HUP to the caller's group leave the board live.
-//   2. Two simultaneous `start --detach` calls on one board both exit 0 with the same server's
+//   1. Owned (the default): the server is started under a parent process, which then dies. The owner
+//      watch saves the board, removes the lock and exits.
+//   2. Detached (WHITEBOARD_OWNER_WATCH=off): the same parent dies and the server keeps serving. Its
+//      lock reads detached, with its own pid as a numeric parentPid, so boards.mjs reads it live;
+//      /done ends it.
+//   3. `whiteboard.sh start --detach`, as a harness's tool call runs it: the server outlives a TERM
+//      and a HUP to its caller's process group.
+//   4. Two simultaneous `start --detach` calls on one board both exit 0 with the same server's
 //      JSON; the one that lost the race sees another session's ownerSessionId, so it is a guest.
+//   3 and 4 need the installed runtime (the script refuses to start without it), so they skip where
+//   `whiteboard.sh status` does not answer installed, as in CI.
 //
 // Every server it starts is stopped, by signalling its own process group.
 //
-//   node tests/whiteboard/detach.test.mjs
+//   node --import tsx tests/whiteboard/detach.test.mjs   (cwd: the skill's server/)
 
 import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import fs from 'node:fs';
 import path from 'node:path';
-import { SKILL_DIR, sandbox } from './harness.mjs';
+import { SERVER_DIR, SKILL_DIR, boards, cleanEnv, sandbox } from './harness.mjs';
 
 const SH = path.join(SKILL_DIR, 'scripts', 'whiteboard.sh');
 const SB = sandbox('detach');
-const ENV = { ...process.env, WHITEBOARD_NO_CANVAS: '1' };
+const ENV = cleanEnv({ WHITEBOARD_NO_CANVAS: '1' });
 
 let passed = 0;
 const failures = [];
@@ -61,11 +67,11 @@ function caller(name, ownerSessionId) {
   });
 }
 
-// Stop a detached server by signalling its own process group (tsx and the node it forks). Only a
-// process running this skill's server is touched, never whatever reused a dead server's pid.
+// Stop a server by signalling its own process group. Only a process running this skill's server is
+// touched, never whatever reused a dead server's pid.
 async function stopServer(pid) {
   const command = spawnSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8' }).stdout;
-  if (!command.includes(path.join(SKILL_DIR, 'server'))) return;
+  if (!/--import tsx index\.ts\b/.test(command) && !command.includes(path.join(SKILL_DIR, 'server'))) return;
   const pgid = pgidOf(pid);
   if (!pgid || pgid === pgidOf(process.pid)) return;
   try { process.kill(-pgid, 'SIGTERM'); } catch { /* gone */ }
@@ -73,8 +79,72 @@ async function stopServer(pid) {
   try { process.kill(-pgid, 'SIGKILL'); } catch { /* gone */ }
 }
 
+// A server started by a parent shell that waits on it, as a background job's shell would. Resolves
+// { parent, port, lock } once it listens; the parent is in a process group of its own.
+async function underParent(name, extraEnv) {
+  const board = SB.board(name);
+  const parent = spawn('/bin/sh', ['-c', '"$0" --import tsx index.ts & wait', process.execPath], {
+    cwd: SERVER_DIR, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...ENV, ...SB.env, WHITEBOARD_BOARD: board, WHITEBOARD_OWNER_WATCH_MS: '200', ...extraEnv },
+  });
+  callers.push(parent);
+  let out = '';
+  parent.stdout.on('data', (d) => { out += d; });
+  parent.stderr.on('data', (d) => { out += d; });
+  const deadline = Date.now() + 20_000;
+  while (!/listening on http:\/\/127\.0\.0\.1:(\d+)/.test(out) && Date.now() < deadline) await sleep(100);
+  const port = Number(/listening on http:\/\/127\.0\.0\.1:(\d+)/.exec(out)?.[1]);
+  const lock = boards.readLock(SB.files(board).lock);
+  if (lock?.pid) servers.add(lock.pid);
+  return { board, parent, port, lock, output: () => out };
+}
+
+async function statusOf(port) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/canvas-status`);
+    return res.ok ? await res.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function ownedExitsWithParent() {
+  console.log('\n[1] owned: the server exits with its parent');
+  const { board, parent, port, lock } = await underParent('Owned');
+  ok(Number.isInteger(port) && port > 0, 'it listens');
+  eq(lock?.parentPid, parent.pid, 'the lock names its parent as parentPid');
+  eq(lock?.detached, undefined, 'and is not detached');
+  eq((await statusOf(port))?.detached, false, '/canvas-status reads detached: false');
+  process.kill(parent.pid, 'SIGKILL');
+  for (let i = 0; i < 40 && alive(lock.pid); i++) await sleep(250);
+  ok(!alive(lock.pid), 'once the parent dies, the server exits');
+  ok(!fs.existsSync(SB.files(board).lock), 'and removes its lock');
+  ok(fs.existsSync(board), 'having saved the board');
+  ok(fs.existsSync(SB.files(board).port), 'and kept its port record for the next boot');
+}
+
+async function detachedOutlivesParent() {
+  console.log('\n[2] detached: the server outlives its parent and ends on /done');
+  const { board, parent, port, lock } = await underParent('Detached', { WHITEBOARD_OWNER_WATCH: 'off' });
+  ok(Number.isInteger(port) && port > 0, 'it listens');
+  eq(lock?.detached, true, 'the lock reads detached');
+  eq(lock?.parentPid, lock?.pid, 'with its own pid as parentPid');
+  ok(typeof lock?.parentPid === 'number', 'a number, so no boot reads it as an older server');
+  eq((await statusOf(port))?.detached, true, '/canvas-status reads detached: true');
+  process.kill(parent.pid, 'SIGKILL');
+  await sleep(2000); // ten owner-watch intervals
+  ok(alive(lock.pid), 'after its parent dies, the server still runs');
+  eq((await statusOf(port))?.activeRoom, SB.room(board), 'and still serves the board');
+  eq((await boards.liveOwner(SB.home, SB.room(board)))?.pid, lock.pid, 'boards.mjs reads it live');
+  const done = await fetch(`http://127.0.0.1:${port}/done`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  eq(done.status, 200, '/done answers 200');
+  for (let i = 0; i < 40 && alive(lock.pid); i++) await sleep(250);
+  ok(!alive(lock.pid), 'and the server exits');
+  ok(!fs.existsSync(SB.files(board).lock), 'removing its lock');
+}
+
 async function survivesGroupSignals() {
-  console.log('\n[1] the server outlives a TERM and a HUP to its caller\'s process group');
+  console.log('\n[3] the server outlives a TERM and a HUP to its caller\'s process group');
   const started = await caller('Group Signals', 'session-a');
   eq(started.code, 0, `start --detach exits 0 ${started.err.trim()}`);
   const where = started.code === 0 ? JSON.parse(started.out) : {};
@@ -96,7 +166,7 @@ async function survivesGroupSignals() {
 }
 
 async function simultaneousStarts() {
-  console.log('\n[2] two simultaneous start --detach calls both attach to one server');
+  console.log('\n[4] two simultaneous start --detach calls both attach to one server');
   const [a, b] = await Promise.all([caller('Race', 'session-a'), caller('Race', 'session-b')]);
   eq(a.code, 0, `the first caller exits 0 ${a.err.trim()}`);
   eq(b.code, 0, `the second caller exits 0 ${b.err.trim()}`);
@@ -113,13 +183,15 @@ async function simultaneousStarts() {
 }
 
 async function main() {
+  await ownedExitsWithParent();
+  await detachedOutlivesParent();
   const status = spawnSync('bash', [SH, 'status', '--repo', SB.root], { encoding: 'utf8' });
   if (status.status !== 0) {
-    console.log('(skipped: the whiteboard runtime is not installed here; whiteboard.sh install)');
-    return;
+    console.log('\n(3 and 4 skipped: whiteboard.sh status does not answer installed here; whiteboard.sh install)');
+  } else {
+    await survivesGroupSignals();
+    await simultaneousStarts();
   }
-  await survivesGroupSignals();
-  await simultaneousStarts();
   console.log(`\n${failures.length ? 'FAIL' : 'PASS'} — ${passed} checks passed, ${failures.length} failed`);
   if (failures.length) { for (const f of failures) console.log(`  - ${f}`); process.exitCode = 1; }
 }

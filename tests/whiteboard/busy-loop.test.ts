@@ -33,34 +33,30 @@
 // Toggle-proof: against the pre-fix index.ts, Phase A spins (~100% CPU) and never exits on /done,
 // and Phase B hangs in teardownRenderCanvas past the bound.
 //
-//   node --import tsx busy-loop.test.ts      (run from server/)
+//   node --import tsx tests/whiteboard/busy-loop.test.ts      (run from the skill's server/)
 //
 // Every server boots on an ephemeral port (its port record is removed first) against a wbspin_*
-// board in the worktree's own .scratchpad/whiteboard/, removed at the end. Exit 0 = pass.
+// board in this suite's own throwaway repository. It needs Playwright's Chromium and the built app,
+// and skips without them (as in CI). Exit 0 = pass.
 
 import { spawn, execFileSync, type ChildProcessByStdio } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
-import { fileURLToPath } from 'node:url';
+import { CANVAS_KEY, SERVER_DIR, hasAppBuild, hasChromium, sandbox } from './harness.mjs';
 
-const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const SERVER_DIR = path.join(SKILL_DIR, 'server');
+// This suite lives outside the skill, in tests/whiteboard/: the server comes from the skill's
+// server/, and every board from this suite's own throwaway repository.
+// No suite server may ring a real session's inbox, take its identity, or read an exported PORT.
+const SCRUBBED_ENV = { CLAUDE_CODE_MESSAGING_SOCKET: undefined, CLAUDE_CODE_MESSAGING_TOKEN: undefined,
+  CLAUDE_CODE_SESSION_ID: undefined, CLAUDE_PID: undefined, CLAUDE_JOB_DIR: undefined, PORT: undefined };
 // Boot the server the way the skill does: node with the tsx loader in-process (#64).
 const BOOT_ARGS = ['--import', 'tsx', 'index.ts'];
 
-function repoRoot(start: string): string {
-  let dir = start;
-  for (;;) {
-    if (fs.existsSync(path.join(dir, '.git'))) return dir;
-    const up = path.dirname(dir);
-    if (up === dir) return start;
-    dir = up;
-  }
-}
-const HOME = path.join(repoRoot(SKILL_DIR), '.scratchpad', 'whiteboard');
-fs.mkdirSync(HOME, { recursive: true });
+// This suite's own throwaway repository (WHITEBOARD_REPO); HOME is its boards folder.
+const SB = sandbox('busy-loop');
+const HOME: string = SB.home;
 
 const A = 'wbspin_a'; // log pipes gone + render-canvas killed, owner alive
 const B = 'wbspin_b'; // render-canvas frozen + /done
@@ -119,8 +115,7 @@ type Server = Omit<ChildProcessByStdio<null, Readable, Readable>, 'pid'> & { rea
 function boot(board: string, { viaOwner = false }: { viaOwner?: boolean } = {}): Server {
   for (const f of boardFiles(board)) fs.rmSync(f, { force: true });
   const env: NodeJS.ProcessEnv = {
-    ...process.env, CLAUDE_CODE_MESSAGING_SOCKET: undefined, CLAUDE_CODE_MESSAGING_TOKEN: undefined,
-    CLAUDE_CODE_SESSION_ID: undefined, CLAUDE_PID: undefined, CLAUDE_JOB_DIR: undefined,
+    ...process.env, ...SCRUBBED_ENV, ...SB.env, WHITEBOARD_CANVAS_KEY: CANVAS_KEY,
     WHITEBOARD_BOARD: path.join(HOME, `${board}.tldr`), WHITEBOARD_OWNER_WATCH_MS: '200',
   };
   const child = viaOwner
@@ -270,6 +265,10 @@ async function phaseC() {
 }
 
 async function main() {
+  if (!hasChromium() || !hasAppBuild()) {
+    console.log('[SKIP] busy-loop: it needs Playwright\'s Chromium and the built app (scripts/whiteboard.sh install)');
+    process.exit(0);
+  }
   try {
     await phaseA();
     await phaseB();

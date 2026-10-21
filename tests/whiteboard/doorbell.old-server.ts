@@ -4,7 +4,7 @@
 // request and never answer, as a server in #63's EPIPE loop does. It prints `PORT=<port>` once
 // listening on an ephemeral loopback port.
 //
-//   DOORBELL_OLD_ANSWER='{"activeRoom":"x"}' node --import tsx doorbell.old-server.ts      (run from server/)
+//   DOORBELL_OLD_ANSWER='{"activeRoom":"x"}' node --import tsx doorbell.old-server.ts      (run from the skill's server/)
 
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';

@@ -14,10 +14,11 @@
 // an app dep the server never loads) — everything downstream (push suppression, the reload clearing
 // it, re-hydration) is the real library.
 //
-//   node --import tsx sync-corruption.test.ts   (run from server/)
+//   node --import tsx tests/whiteboard/sync-corruption.test.ts   (run from the skill's server/)
 //
-// Boots the real bridge over tsx with WHITEBOARD_NO_CANVAS (no Playwright), ephemeral ports, temp
-// scratch under the repo's .scratchpad. Exit 0 = pass.
+// Boots the real bridge over tsx with WHITEBOARD_NO_CANVAS (no Playwright), ephemeral ports, in this
+// suite's own throwaway repository. Boards R, R6, B, L and A run the real render-canvas and skip
+// without Playwright's Chromium and the built app. Exit 0 = pass.
 //
 // How it bites: board X runs with the v9.5 guard ON (default) — a poison then a well-formed exec,
 // and the well-formed shape reaches the room via server-owned recovery. Board Y runs the SAME
@@ -108,9 +109,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { Readable } from 'node:stream';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { WebSocket as WsClient } from 'ws';
-import { chromium, type Browser } from 'playwright';
+import type { Browser } from 'playwright';
 // Types only: erased at run time, so nothing of tldraw loads before the browser-global shim below.
 import type { IdOf } from '@tldraw/store';
 import type {
@@ -118,29 +117,30 @@ import type {
   TLShape, TLShapeId, TLStore, TLStoreProps,
 } from '@tldraw/tlschema';
 import type { TLSyncClient as TLSyncClientType } from '@tldraw/sync-core';
+import { createRequire } from 'node:module';
+import { CANVAS_KEY, SERVER_DIR, hasAppBuild, hasChromium, sandbox } from './harness.mjs';
 
 // The store's corruption flag, excluded from @tldraw/store's published typings but public at run time
 // in the installed 5.4.2; App.tsx's exec scope reaches it as editor.store.isPossiblyCorrupted().
 interface CorruptionFlag { markAsPossiblyCorrupted(): void; isPossiblyCorrupted(): boolean }
 type CanvasStore = TLStore & CorruptionFlag;
 
-const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const SERVER_DIR = path.join(SKILL_DIR, 'server');
+// This suite lives outside the skill, in tests/whiteboard/: the server and its packages come from
+// the skill's server/, and every board from this suite's own throwaway repository.
+const serverRequire = createRequire(path.join(SERVER_DIR, 'package.json'));
+const { WebSocket: WsClient } = serverRequire('ws') as typeof import('ws');
+type WsClient = import('ws').WebSocket;
+const { chromium } = serverRequire('playwright') as typeof import('playwright');
+// No suite server may ring a real session's inbox, take its identity, or read an exported PORT.
+const SCRUBBED_ENV = { CLAUDE_CODE_MESSAGING_SOCKET: undefined, CLAUDE_CODE_MESSAGING_TOKEN: undefined,
+  CLAUDE_CODE_SESSION_ID: undefined, CLAUDE_PID: undefined, CLAUDE_JOB_DIR: undefined, PORT: undefined };
 // Boot the server the way the skill does (node with the tsx loader in-process, no tsx CLI
 // wrapper), so the spawned child IS the server and killing it never orphans a board.
 const BOOT_ARGS = ['--import', 'tsx', 'index.ts'];
 
-function repoRoot(start: string): string {
-  let dir = start;
-  for (;;) {
-    if (fs.existsSync(path.join(dir, '.git'))) return dir;
-    const up = path.dirname(dir);
-    if (up === dir) return start;
-    dir = up;
-  }
-}
-const HOME = path.join(repoRoot(SKILL_DIR), '.scratchpad', 'whiteboard');
-fs.mkdirSync(HOME, { recursive: true });
+// This suite's own throwaway repository (WHITEBOARD_REPO); HOME is its boards folder.
+const SB = sandbox('sync-corruption');
+const HOME: string = SB.home;
 
 const X = 'wbsync_x'; // guard ON: poison → well-formed reaches the room via recovery
 const Y = 'wbsync_y'; // guard OFF: same sequence freezes the board (the bug the fix repairs)
@@ -170,7 +170,8 @@ const C = 'wbsync_c'; // a reloaded canvas that never shows the put-back is not 
 const Q0 = 'wbsync_q0'; // a canvas still corrupted and no reload begun: the line says the time ran out
 const Q1 = 'wbsync_q1'; // a canvas still corrupted after one reload: "tried 1 time"
 const Q2 = 'wbsync_q2'; // a canvas still corrupted after two reloads: "tried 2 times"
-const boards = [X, Y, Z, P, U, HV, D, G, M, K, N, N2, N3, E, E0, T, S, V, V2, C, Q0, Q1, Q2, R, R6, B, L, A];
+const US = 'wbsync_us'; // a switch away from a board whose change cannot be saved is refused
+const boards = [X, Y, Z, P, U, HV, D, G, M, K, N, N2, N3, E, E0, T, S, V, V2, C, Q0, Q1, Q2, US, R, R6, B, L, A];
 
 // --- browser-global shim (mirrors server/headless-shim.ts) BEFORE any tldraw client code --------
 const g = globalThis as unknown as {
@@ -185,12 +186,13 @@ g.requestAnimationFrame ??= (cb) => setTimeout(() => cb(Date.now()), 16);
 g.cancelAnimationFrame ??= (id) => clearTimeout(id as ReturnType<typeof setTimeout>);
 
 // tldraw client stack, imported after the shim so module-init global reads succeed.
-const { Store } = await import('@tldraw/store');
-const { createTLSchema } = await import('@tldraw/tlschema');
-const { TLSyncClient } = await import('@tldraw/sync-core');
-// The published typings omit ClientWebSocketAdapter; client-adapter.ts types the runtime export.
-const { ClientWebSocketAdapter } = await import('./client-adapter.js');
-const { atom } = await import('@tldraw/state');
+const { Store } = serverRequire('@tldraw/store') as typeof import('@tldraw/store');
+const { createTLSchema } = serverRequire('@tldraw/tlschema') as typeof import('@tldraw/tlschema');
+const { TLSyncClient } = serverRequire('@tldraw/sync-core') as typeof import('@tldraw/sync-core');
+// The published typings omit ClientWebSocketAdapter; the server's client-adapter.ts types the runtime
+// export.
+const { ClientWebSocketAdapter } = serverRequire('@tldraw/sync-core') as unknown as typeof import('../../skills/_incubating/whiteboard/server/client-adapter.js');
+const { atom } = serverRequire('@tldraw/state') as typeof import('@tldraw/state');
 
 type SyncClient = TLSyncClientType<TLRecord, TLStore>;
 type ClientSocket = InstanceType<typeof ClientWebSocketAdapter>;
@@ -213,8 +215,7 @@ function boot(board: string, extraEnv: Record<string, string> = {}): BootedServe
   const boardPath = path.join(HOME, `${board}.tldr`);
   const child = spawn(process.execPath, BOOT_ARGS, {
     cwd: SERVER_DIR,
-    env: { ...process.env, CLAUDE_CODE_MESSAGING_SOCKET: undefined, CLAUDE_CODE_MESSAGING_TOKEN: undefined,
-    CLAUDE_CODE_SESSION_ID: undefined, CLAUDE_PID: undefined, CLAUDE_JOB_DIR: undefined, WHITEBOARD_NO_CANVAS: '1', WHITEBOARD_BOARD: boardPath, ...extraEnv },
+    env: { ...process.env, ...SCRUBBED_ENV, ...SB.env, WHITEBOARD_CANVAS_KEY: CANVAS_KEY, WHITEBOARD_NO_CANVAS: '1', WHITEBOARD_BOARD: boardPath, ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
   }) as BootedServer;
   child._log = '';
@@ -510,7 +511,7 @@ class FakeCanvas {
   }
 
   connectEvents() {
-    this.ev = new WsClient(`ws://127.0.0.1:${this.port}/events?role=agent`);
+    this.ev = new WsClient(`ws://127.0.0.1:${this.port}/events?role=agent&canvasKey=${CANVAS_KEY}`);
     this.ev.on('message', (raw) => { try { this.handleFrame(JSON.parse(raw.toString())); } catch { /* ignore */ } });
     // A server-driven recovery reloads the canvas by dropping this socket; a real page would come
     // back with a fresh, uncorrupted store. Mirror that: rebuild the store + sync client + socket.
@@ -1380,7 +1381,7 @@ async function boardA() {
     peer = await syncPeer(port, A);
 
     // The operator's shape, stamped as the operator's tab stamps it, and one the lead drew.
-    const opStamp = { kind: 'human', name: 'Spencer', sessionId: 'op-key', at: Date.now() - 60000 };
+    const opStamp = { kind: 'human', name: 'Operator', sessionId: 'op-key', at: Date.now() - 60000 };
     peer.put({ ...geoRecord('shape:a_op', 0), meta: { createdBy: opStamp, lastEditedBy: opStamp } });
     await exec(lead, "editor.createShapes([{ id: 'shape:a_lead', type: 'geo', x: 300, y: 0, props: { geo: 'rectangle', w: 120, h: 80 } }]); return 1");
     ok(await waitFor(async () => (await exec(lead, "return !!editor.getShape('shape:a_op')")).result === true && !!peer!.get('shape:a_lead'), 5000),
@@ -1446,7 +1447,7 @@ async function boardA() {
     const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
     await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: `http://127.0.0.1:${port}` });
     const tab = await ctx.newPage();
-    await tab.goto(`http://127.0.0.1:${port}/?room=${A}&author=Spencer&authorKey=op-key`);
+    await tab.goto(`http://127.0.0.1:${port}/?room=${A}&author=Operator&authorKey=op-key`);
     const held = Object.keys(peer.shapes()).length;
     ok(await waitFor(async () => (await tab.locator('.tl-shape').count()) >= held, 30000, 200), "A: the operator's tab shows the board");
     const keyboardCopies = async (label: string, keys: string[]) => {
@@ -1455,7 +1456,7 @@ async function boardA() {
       for (const key of keys) { await tab.keyboard.press(key); await sleep(300); } // a copy writes the clipboard asynchronously
       ok(await waitFor(() => Object.keys(peer!.shapes()).length === 2 * Object.keys(before).length, 5000), `A: the operator's ${label} copies every shape into the room`);
       const copies = Object.values(peer!.shapes()).filter((r) => !before[r.id]);
-      ok(copies.length > 0 && copies.every((r) => r.meta?.createdBy?.name === 'Spencer' && r.meta?.createdBy?.kind === 'human' && r.meta?.lastEditedBy?.name === 'Spencer'),
+      ok(copies.length > 0 && copies.every((r) => r.meta?.createdBy?.name === 'Operator' && r.meta?.createdBy?.kind === 'human' && r.meta?.lastEditedBy?.name === 'Operator'),
         `INVARIANT: every copy the operator's ${label} makes, of the agents' shapes and the operator's, is the operator's (${JSON.stringify(copies.map((r) => r.meta?.createdBy?.name))})`);
       eq(Object.fromEntries(Object.entries(peer!.shapes()).filter(([id]) => before[id]).map(([id, r]) => [id, r.meta])),
         Object.fromEntries(Object.entries(before).map(([id, r]) => [id, r.meta])), `A: the operator's ${label} leaves every original's stamps as they were`);
@@ -1472,6 +1473,48 @@ async function boardA() {
     peer?.close();
     await stopCanvasServer(srv);
   }
+}
+
+// ── Board US: a switch away from a board whose change cannot be saved is refused. ──────────────────
+// The board's folder is read-only, so the room changes but cannot be flushed. Evicting it would lose
+// the change, so the server keeps it, its peers and its lock, and refuses the switch; once the folder
+// is writable again, closing saves the change.
+async function boardUS() {
+  const roDir = path.join(SB.root, 'read-only');
+  fs.mkdirSync(roDir, { recursive: true });
+  const boardPath = path.join(roDir, `${US}.tldr`);
+  const target = `${US}_target`;
+  const srv = boot(US, { WHITEBOARD_BOARD: boardPath });
+  const port = await srv._port;
+  const fake = new FakeCanvas(port, US);
+  try {
+    await fake.connect();
+    console.log(`\n[US a switch away from an unsaveable board] port=${port}`);
+    fs.chmodSync(roDir, 0o555);
+    await post(port, '/exec', { code: validCode('shape:us_good', 0) });
+    ok((await waitRoomShapes(port, 1, 4000)) >= 1, 'US: the change reached the room');
+    const switched = await fetch(`http://127.0.0.1:${port}/board/open`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: path.join(HOME, `${target}.tldr`) }),
+    });
+    const refusal = (await switched.json().catch(() => ({}))) as { error?: string };
+    ok(switched.status === 503 && /cannot be saved/.test(refusal.error ?? ''), `US: the switch is refused, saying why (${switched.status} ${refusal.error})`);
+    const status = await getJson<CanvasStatus & { activeRoom?: string }>(port, '/canvas-status');
+    ok(status.activeRoom === US, `US: the server still serves the board it could not save (${status.activeRoom})`);
+    ok((status.roomShapes ?? 0) >= 1, 'US: and its room still holds the change');
+    ok(fs.existsSync(path.join(HOME, `${US}.lock`)), 'US: its lock is kept');
+    ok(!fs.existsSync(path.join(HOME, `${target}.lock`)), "US: the target board's lock was released");
+    const msgs = (await getJson<MessagesAnswer>(port, '/messages')).messages ?? [];
+    ok(msgs.some((m) => typeof m.text === 'string' && m.text.startsWith('The board cannot be saved')), 'US: the panel says the board cannot be saved');
+  } finally {
+    fs.chmodSync(roDir, 0o755);
+    fake.close();
+  }
+  const exited = new Promise((resolve) => srv.once('exit', resolve));
+  await post(port, '/done', {});
+  await exited;
+  ok(fs.existsSync(boardPath) && fs.readFileSync(boardPath, 'utf8').includes('shape:us_good'), 'US: once the folder is writable again, closing saves the change');
+  fs.rmSync(roDir, { recursive: true, force: true });
+  for (const ext of ['tldr', 'messages.jsonl', 'recipients.json', 'lock', 'png', 'port']) fs.rmSync(path.join(HOME, `${target}.${ext}`), { force: true });
 }
 
 function cleanupFiles() {
@@ -1561,11 +1604,17 @@ async function main() {
   await boardQ('0');
   await boardQ('1');
   await boardQ('2');
-  await boardR();
-  await boardR6();
-  await boardB();
-  await boardL();
-  await boardA();
+  await boardUS();
+  // Boards R, R6, B, L and A run the real render-canvas: Playwright's Chromium and the built app.
+  if (hasChromium() && hasAppBuild()) {
+    await boardR();
+    await boardR6();
+    await boardB();
+    await boardL();
+    await boardA();
+  } else {
+    console.log('\n[SKIP] Boards R, R6, B, L and A: they need Playwright\'s Chromium and the built app (scripts/whiteboard.sh install)');
+  }
 
   cleanupFiles();
   const left = fs.readdirSync(HOME).filter((f) => boards.some((b) => f.startsWith(`${b}.`)));

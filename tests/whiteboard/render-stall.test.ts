@@ -18,36 +18,30 @@
 //
 // The render-canvas here is a FAKE ws client joined as role=agent; there is no Playwright and no live
 // board. Every server boots on an ephemeral port (its port record is removed first) against a
-// wbtest_* board in the worktree's own .scratchpad/whiteboard/ — the live board on port 62919 is
-// never touched.
+// wbtest_* board in this suite's own throwaway repository, so no running board is ever touched.
 //
-//   node --import tsx render-stall.test.ts      (run from server/)
+//   node --import tsx tests/whiteboard/render-stall.test.ts      (run from the skill's server/)
 
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { WebSocket } from 'ws';
+import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
-import { fileURLToPath } from 'node:url';
+import { CANVAS_KEY, SERVER_DIR, sandbox } from './harness.mjs';
 
-const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const SERVER_DIR = path.join(SKILL_DIR, 'server');
+// This suite lives outside the skill: ws loads from the skill's server/node_modules.
+const { WebSocket } = createRequire(path.join(SERVER_DIR, 'package.json'))('ws') as typeof import('ws');
 // Boot the server the way the skill does (node with the tsx loader in-process, no tsx CLI
 // wrapper), so the spawned child IS the server and killing it never orphans a board.
 const BOOT_ARGS = ['--import', 'tsx', 'index.ts'];
+// No suite server may ring a real session's inbox, take its identity, or read an exported PORT.
+const SCRUBBED_ENV = { CLAUDE_CODE_MESSAGING_SOCKET: undefined, CLAUDE_CODE_MESSAGING_TOKEN: undefined,
+  CLAUDE_CODE_SESSION_ID: undefined, CLAUDE_PID: undefined, CLAUDE_JOB_DIR: undefined, PORT: undefined };
 
-function repoRoot(start: string): string {
-  let dir = start;
-  for (;;) {
-    if (fs.existsSync(path.join(dir, '.git'))) return dir;
-    const up = path.dirname(dir);
-    if (up === dir) return start;
-    dir = up;
-  }
-}
-const HOME = path.join(repoRoot(SKILL_DIR), '.scratchpad', 'whiteboard');
-fs.mkdirSync(HOME, { recursive: true });
+// This suite's own throwaway repository; HOME is its boards folder.
+const SB = sandbox('render-stall');
+const HOME: string = SB.home;
 
 // --- tiny assertion harness -------------------------------------------------
 let passed = 0;
@@ -70,8 +64,7 @@ function boot(board: string, extraEnv: Record<string, string> = {}): Server {
   try { fs.rmSync(path.join(HOME, `${board}.png`), { force: true }); } catch {} // start with NO good frame
   const child = spawn(process.execPath, BOOT_ARGS, {
     cwd: SERVER_DIR,
-    env: { ...process.env, CLAUDE_CODE_MESSAGING_SOCKET: undefined, CLAUDE_CODE_MESSAGING_TOKEN: undefined,
-    CLAUDE_CODE_SESSION_ID: undefined, CLAUDE_PID: undefined, CLAUDE_JOB_DIR: undefined, WHITEBOARD_NO_CANVAS: '1', WHITEBOARD_BOARD: boardPath, ...extraEnv },
+    env: { ...process.env, ...SCRUBBED_ENV, ...SB.env, WHITEBOARD_CANVAS_KEY: CANVAS_KEY, WHITEBOARD_NO_CANVAS: '1', WHITEBOARD_BOARD: boardPath, ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const port = new Promise<number>((resolve, reject) => {
@@ -113,7 +106,7 @@ type Behavior = (id: string, ws: WebSocket) => void | Promise<void>;
 interface FakeCanvas { ws: WebSocket; behavior: Behavior | null; lastExportId: string | null }
 interface ExportFrame { type?: string; id: string }
 async function fakeRenderCanvas(port: number): Promise<FakeCanvas> {
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/events?role=agent`);
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/events?role=agent&canvasKey=${CANVAS_KEY}`);
   const rc: FakeCanvas = { ws, behavior: null, lastExportId: null };
   ws.on('message', async (raw) => {
     let msg: ExportFrame; try { msg = JSON.parse(raw.toString()) as ExportFrame; } catch { return; }

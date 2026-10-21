@@ -1,7 +1,7 @@
 // [render-cap] Test-only preload for Phases V and W of render-cap.test.ts. The suite loads it into the
 // server's Node process through NODE_OPTIONS (`--import tsx --import <this file's URL>`); the server
 // imports nothing from it. It arranges the render-canvas pages through the Playwright module the server
-// itself imports (resolved from this folder, as index.ts resolves it):
+// itself imports (resolved from the server's working directory, its server/ folder, as index.ts does):
 // - every page runs, at the start of each document, a script that blocks its main thread for
 //   sessionStorage 'wbtest-block' ms, once, and reloads the page while the time is before sessionStorage
 //   'wbtest-reload-until', so a blob can make the next document block, or make each document reload;
@@ -14,11 +14,12 @@
 // The server's callback is matched as tsx compiles it, `()=>true`, with whitespace removed.
 
 import { createRequire } from 'node:module';
+import path from 'node:path';
 import type { Browser, BrowserType, Page } from 'playwright';
 
 const navOnBootVerify = process.env.WBTEST_NAV_ON_BOOT_VERIFY === '1';
 
-const { chromium } = createRequire(import.meta.url)('playwright') as typeof import('playwright');
+const { chromium } = createRequire(path.join(process.cwd(), 'package.json'))('playwright') as typeof import('playwright');
 const INIT = "{ const b = Number(sessionStorage.getItem('wbtest-block')); if (b > 0) { sessionStorage.removeItem('wbtest-block'); const end = Date.now() + b; while (Date.now() < end) {} } if (Number(sessionStorage.getItem('wbtest-reload-until')) > Date.now()) location.reload(); }";
 const RELOAD = "sessionStorage.setItem('wbtest-block', '8000'); setTimeout(() => { location.reload(); const end = Date.now() + 3000; while (Date.now() < end) {} }, 0)";
 const launch = chromium.launch.bind(chromium);

@@ -1,6 +1,6 @@
 // [render-cap] Regression test for the render-canvas OOM/hang fix (2026-09-28).
 //
-// Context (from HANDOFF 20260927-213224): the whole-board PNG export hung/OOM'd the degraded
+// Context: the whole-board PNG export hung/OOM'd the degraded
 // headless Chromium and the bridge's /image waiter timed out recording NOTHING — every
 // lastExport* field stayed null, so the stall was invisible. The fix has four parts; two are
 // bridge-side and provable here against a FAKE render-canvas (no Playwright, no live board):
@@ -135,23 +135,33 @@
 // blob: 5 of 18 fail.
 //
 // Every server boots on an ephemeral port (its port record is removed first) against a wbtest_*
-// board in the worktree's own .scratchpad/whiteboard/ — the live board on port 62919 is never touched.
+// board in this suite's own throwaway repository, so no running board is ever touched. Phases C-W
+// need Playwright's Chromium and the built app, and skip without them (as in CI).
 //
-//   node --import tsx render-cap.test.ts   (run from server/)
+//   node --import tsx tests/whiteboard/render-cap.test.ts   (run from the skill's server/)
 
 import { spawn, execFileSync, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { WebSocket } from 'ws';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { isCanvasDriverFault as IsCanvasDriverFault } from './canvas-fault.js';
 import type { TLSyncClient } from '@tldraw/sync-core';
 import type { TLRecord, TLShapeId, TLStoreProps } from '@tldraw/tlschema';
+import { createRequire } from 'node:module';
+import { CANVAS_KEY, SERVER_DIR, hasAppBuild, hasChromium, sandbox } from './harness.mjs';
 
-const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const SERVER_DIR = path.join(SKILL_DIR, 'server');
+// This suite lives outside the skill, in tests/whiteboard/: the server and its packages come from
+// the skill's server/, and every board from this suite's own throwaway repository.
+const serverRequire = createRequire(path.join(SERVER_DIR, 'package.json'));
+const { WebSocket } = serverRequire('ws') as typeof import('ws');
+type WebSocket = import('ws').WebSocket;
+// The test-only preloads sit beside this suite.
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+// No suite server may ring a real session's inbox, take its identity, or read an exported PORT.
+const SCRUBBED_ENV = { CLAUDE_CODE_MESSAGING_SOCKET: undefined, CLAUDE_CODE_MESSAGING_TOKEN: undefined,
+  CLAUDE_CODE_SESSION_ID: undefined, CLAUDE_PID: undefined, CLAUDE_JOB_DIR: undefined, PORT: undefined };
 // Boot the server the way the skill does (node with the tsx loader in-process, no tsx CLI
 // wrapper), so the spawned child IS the server and killing it never orphans a board.
 const BOOT_ARGS = ['--import', 'tsx', 'index.ts'];
@@ -189,17 +199,9 @@ interface ApiResponse { status: number; body: ApiBody }
 interface MessagesBody { messages?: { author?: { name?: string }; text?: string }[] }
 type Server = ChildProcessByStdio<null, Readable, Readable> & { _log: string; _port: Promise<number> };
 
-function repoRoot(start: string): string {
-  let dir = start;
-  for (;;) {
-    if (fs.existsSync(path.join(dir, '.git'))) return dir;
-    const up = path.dirname(dir);
-    if (up === dir) return start;
-    dir = up;
-  }
-}
-const HOME = path.join(repoRoot(SKILL_DIR), '.scratchpad', 'whiteboard');
-fs.mkdirSync(HOME, { recursive: true });
+// This suite's own throwaway repository (WHITEBOARD_REPO); HOME is its boards folder.
+const SB = sandbox('render-cap');
+const HOME: string = SB.home;
 
 // --- tiny assertion harness -------------------------------------------------
 let passed = 0;
@@ -225,8 +227,7 @@ function boot(board: string, extraEnv: Record<string, string> = {}): Server {
   try { fs.rmSync(path.join(HOME, `${board}.png`), { force: true }); } catch {}
   const child = spawn(process.execPath, BOOT_ARGS, {
     cwd: SERVER_DIR,
-    env: { ...process.env, CLAUDE_CODE_MESSAGING_SOCKET: undefined, CLAUDE_CODE_MESSAGING_TOKEN: undefined,
-    CLAUDE_CODE_SESSION_ID: undefined, CLAUDE_PID: undefined, CLAUDE_JOB_DIR: undefined, WHITEBOARD_NO_CANVAS: '1', WHITEBOARD_BOARD: boardPath, ...extraEnv },
+    env: { ...process.env, ...SCRUBBED_ENV, ...SB.env, WHITEBOARD_CANVAS_KEY: CANVAS_KEY, WHITEBOARD_NO_CANVAS: '1', WHITEBOARD_BOARD: boardPath, ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const server: Server = Object.assign(child, { _log: '', _port: Promise.resolve(0) });
@@ -269,7 +270,7 @@ async function uploadPng(port: number, id: string, bytes: number): Promise<unkno
 type Behavior = (msg: ExportFrame, ws: WebSocket) => unknown;
 interface FakeCanvas { ws: WebSocket; behavior: Behavior | null; frames: ExportFrame[] }
 async function fakeRenderCanvas(port: number): Promise<FakeCanvas> {
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/events?role=agent`);
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/events?role=agent&canvasKey=${CANVAS_KEY}`);
   const rc: FakeCanvas = { ws, behavior: null, frames: [] };
   ws.on('message', async (raw) => {
     let msg: { type?: unknown }; try { msg = JSON.parse(raw.toString()) as { type?: unknown }; } catch { return; }
@@ -436,12 +437,13 @@ async function syncPeer(port: number, room: string): Promise<SyncPeer> {
   g.document ??= { addEventListener() {}, removeEventListener() {}, hidden: false, visibilityState: 'visible' };
   g.requestAnimationFrame ??= (cb: (t: number) => void) => setTimeout(() => cb(Date.now()), 16);
   g.cancelAnimationFrame ??= (id: ReturnType<typeof setTimeout>) => clearTimeout(id);
-  const { Store } = await import('@tldraw/store');
-  const { createTLSchema } = await import('@tldraw/tlschema');
-  const { TLSyncClient } = await import('@tldraw/sync-core');
-  // The published typings omit ClientWebSocketAdapter; client-adapter.ts types the same runtime export.
-  const { ClientWebSocketAdapter } = await import('./client-adapter.js');
-  const { atom } = await import('@tldraw/state');
+  const { Store } = serverRequire('@tldraw/store') as typeof import('@tldraw/store');
+  const { createTLSchema } = serverRequire('@tldraw/tlschema') as typeof import('@tldraw/tlschema');
+  const { TLSyncClient } = serverRequire('@tldraw/sync-core') as typeof import('@tldraw/sync-core');
+  // The published typings omit ClientWebSocketAdapter; the server's client-adapter.ts types the same
+  // runtime export.
+  const { ClientWebSocketAdapter } = serverRequire('@tldraw/sync-core') as unknown as typeof import('../../skills/_incubating/whiteboard/server/client-adapter.js');
+  const { atom } = serverRequire('@tldraw/state') as typeof import('@tldraw/state');
   const store = new Store({ schema: createTLSchema(), props: {} as TLStoreProps });
   const socket = new ClientWebSocketAdapter(() => `ws://127.0.0.1:${port}/sync/${room}`);
   let client!: TLSyncClient<TLRecord>;
@@ -710,7 +712,7 @@ async function phaseJ() {
     const st1 = await canvasStatus(port);
     eq(`${st1.lastExportOk} ${st1.lastExportError}`, 'null null', 'INVARIANT: the successful launch withdraws the give-up');
     // A role=agent socket takes the bridge's canvas socket and never answers an export, so an /image parks.
-    fake = new WebSocket(`ws://127.0.0.1:${port}/events?role=agent`);
+    fake = new WebSocket(`ws://127.0.0.1:${port}/events?role=agent&canvasKey=${CANVAS_KEY}`);
     await new Promise((resolve, reject) => { fake!.once('open', resolve); fake!.once('error', reject); });
     const t = Date.now();
     const parked = getImage(port);
@@ -1293,7 +1295,7 @@ async function phaseS() {
 // inside the server without the server gaining a hook. Each is a .ts file beside this suite, loaded through
 // tsx, so `--import tsx` comes first. NODE_OPTIONS is split on spaces, so each is named by its file URL,
 // whose spaces are percent-encoded.
-const preloads = (...files: string[]): { NODE_OPTIONS: string } => ({ NODE_OPTIONS: [process.env.NODE_OPTIONS ?? '', '--import=tsx', ...files.map((f) => `--import=${pathToFileURL(path.join(SERVER_DIR, f)).href}`)].join(' ').trim() });
+const preloads = (...files: string[]): { NODE_OPTIONS: string } => ({ NODE_OPTIONS: [process.env.NODE_OPTIONS ?? '', '--import=tsx', ...files.map((f) => `--import=${pathToFileURL(path.join(HERE, f)).href}`)].join(' ').trim() });
 
 // A server whose Node process throws, on SIGUSR2, a fault with the stack of Phase P's driver fault (an
 // assertion in Playwright's dispatch of a Chromium message), from its own setImmediate, so it reaches the
@@ -1525,6 +1527,13 @@ async function phaseW() {
 async function main() {
   await phaseA();
   await phaseB();
+  // Phases C onward run a real render-canvas: Playwright's Chromium and the built app. CI has neither.
+  if (!hasChromium() || !hasAppBuild()) {
+    console.log('\n[SKIP] Phases C-W: they need Playwright\'s Chromium and the built app (scripts/whiteboard.sh install)');
+    console.log(`\n${passed} passed, ${failures.length} failed`);
+    if (failures.length) { for (const f of failures) console.log(`  FAILED: ${f}`); process.exit(1); }
+    process.exit(0);
+  }
   await phaseC();
   await phaseD();
   await phaseE();

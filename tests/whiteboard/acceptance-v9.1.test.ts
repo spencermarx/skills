@@ -11,45 +11,39 @@
 //      graceful POST /done returns ok.
 //
 // The carried §8.5 durable-delivery / lead-status / lease checks are NOT duplicated here — they
-// already pass in server/integration.test.ts (boards C durable-queue + re-drain, D lead status
+// already pass in integration.test.ts (boards C durable-queue + re-drain, D lead status
 // flip, E lease/visibility-timeout, F–J per-recipient routing/broadcast, K typed-AgentId 400,
 // L verbatim nudge). This file adds only what v9.1 introduces, plus one durable-floor assertion
 // specific to v9.1: that a teardown REQUEST does not enter the queue or displace pending work.
 // The meta.createdBy authorship check (§8.6) needs the live render-canvas (the app stamps it via
 // an editor side-effect), so it is not headlessly testable with WHITEBOARD_NO_CANVAS and lives in
-// the manual runbook references/acceptance-v9.1.md instead.
+// the manual runbook tests/whiteboard/acceptance-runbook.md instead.
 //
-//   node --import tsx acceptance-v9.1.test.ts      (run from server/)
+//   node --import tsx tests/whiteboard/acceptance-v9.1.test.ts      (run from the skill's server/)
 //
 // Same harness as integration.test.ts: boots the real bridge over tsx with the render-canvas
-// skipped (WHITEBOARD_NO_CANVAS), ephemeral ports, temp scratch under the repo's .scratchpad. No
-// Chromium, no browser, no reliance on the live :65459 board, no external network. Exit 0 = pass.
+// skipped (WHITEBOARD_NO_CANVAS), ephemeral ports, in this suite's own throwaway repository. No
+// Chromium, no browser, no running board touched, no external network. Exit 0 = pass.
 
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
-import { fileURLToPath } from 'node:url';
+import { CANVAS_KEY, SERVER_DIR, sandbox } from './harness.mjs';
 
-const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const SERVER_DIR = path.join(SKILL_DIR, 'server');
+// This suite lives outside the skill, in tests/whiteboard/: the server comes from the skill's
+// server/, and every board from this suite's own throwaway repository.
+// No suite server may ring a real session's inbox, take its identity, or read an exported PORT.
+const SCRUBBED_ENV = { CLAUDE_CODE_MESSAGING_SOCKET: undefined, CLAUDE_CODE_MESSAGING_TOKEN: undefined,
+  CLAUDE_CODE_SESSION_ID: undefined, CLAUDE_PID: undefined, CLAUDE_JOB_DIR: undefined, PORT: undefined };
 // Boot the server the way the skill does (node with the tsx loader in-process, no tsx CLI
 // wrapper), so the spawned child IS the server and killing it never orphans a board.
 const BOOT_ARGS = ['--import', 'tsx', 'index.ts'];
 
-// Mirror the server's repo-root walk to locate HOME = <root>/.scratchpad/whiteboard.
-function repoRoot(start: string): string {
-  let dir = start;
-  for (;;) {
-    if (fs.existsSync(path.join(dir, '.git'))) return dir;
-    const up = path.dirname(dir);
-    if (up === dir) return start;
-    dir = up;
-  }
-}
-const HOME = path.join(repoRoot(SKILL_DIR), '.scratchpad', 'whiteboard');
-fs.mkdirSync(HOME, { recursive: true });
+// This suite's own throwaway repository (WHITEBOARD_REPO); HOME is its boards folder.
+const SB = sandbox('acceptance');
+const HOME: string = SB.home;
 
 // Distinct board names (own prefix) so this file can run alongside integration.test.ts without
 // colliding on .tldr / .lock / .messages.jsonl files or room ids.
@@ -74,8 +68,7 @@ function boot(board: string, extraEnv: Record<string, string> = {}): Server {
   const boardPath = path.join(HOME, `${board}.tldr`);
   const child = spawn(process.execPath, BOOT_ARGS, {
     cwd: SERVER_DIR,
-    env: { ...process.env, CLAUDE_CODE_MESSAGING_SOCKET: undefined, CLAUDE_CODE_MESSAGING_TOKEN: undefined,
-    CLAUDE_CODE_SESSION_ID: undefined, CLAUDE_PID: undefined, CLAUDE_JOB_DIR: undefined, WHITEBOARD_NO_CANVAS: '1', WHITEBOARD_BOARD: boardPath, ...extraEnv },
+    env: { ...process.env, ...SCRUBBED_ENV, ...SB.env, WHITEBOARD_CANVAS_KEY: CANVAS_KEY, WHITEBOARD_NO_CANVAS: '1', WHITEBOARD_BOARD: boardPath, ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const port = new Promise<number>((resolve, reject) => {
