@@ -1,36 +1,43 @@
 # Whiteboard — manual acceptance runbook
 
 The operator-in-the-loop half of the done-bar. The headless suite proves everything a
-process can prove without a human and a live Claude Code session:
-`server/doorbell.test.ts` (the pull, the receipt, the doorbell against a fake inbox,
+process can prove without a human and a live session. The suites are in `tests/whiteboard/`:
+`doorbell.test.ts` (the pull, the receipt, the doorbell against a fake inbox,
 the canary, the owner watch, same-port restart, the one-server lock claim and its wait on a
 board being released or held by an owner that is not answering, the transactional board
 switch, the Origin/Host guard),
-`server/acceptance-v9.1.test.ts` (the recipient guard and the teardown seam),
-`server/integration.test.ts` (the durable floor, workers, revival),
-`server/busy-loop.test.ts` (a dead log pipe, a frozen canvas, the owner dying) and
-`server/render-cap.test.ts` (the `?bounds=` forwarding and the no-frame timeout against a fake
+`acceptance-v9.1.test.ts` (the recipient guard and the teardown seam),
+`integration.test.ts` (the durable floor, workers, revival),
+`busy-loop.test.ts` (a dead log pipe, a frozen canvas, the owner dying) and
+`render-cap.test.ts` (the `?bounds=` forwarding and the no-frame timeout against a fake
 canvas, and, in a real Chromium, the render-canvas relaunch after a renderer crash, a failed
 navigation, a switch during the relaunch, a renderer that stops answering, a switch during
 the boot launch and a switch to an empty board, a give-up that a later launch withdraws, perception during a frozen navigation and during a relaunch, and what a failed `/exec` leaves;
 the app-side raster cap is not covered). What is
-left needs Spencer at the browser, a lead session running the skill, and a real turn
+left needs an operator at the browser, a lead session running the skill, and a real turn
 cycle: a ring arriving in the session, the model fetching it, mid-draw pickup, the
 board's lifetime, the teardown affordance, and per-object authorship on the live canvas.
 
-Run this on the branch, after building the app with SKILL.md §1 step 3's build line,
-`npm --prefix "<skill dir>/app" run build`, `<skill dir>` being this skill's folder.
-`<port>` is the port the server prints on boot; `<board>` is its name.
+Sections 0 to 5 are the Claude Code path (the doorbell, the canary, the owned boot); section 6
+is the pull path every other harness takes. Run it on the branch, from the repository root, after
+installing the runtime, which also builds the app:
+`bash skills/_incubating/whiteboard/scripts/whiteboard.sh install --repo . --scratch .scratchpad`.
+`<port>` is the port the server prints on boot; `<board>` is its name; the board's files are in
+the boards folder, `.scratchpad/whiteboard/`.
 
 ## 0. Clean start and the canary
 
-1. Run `/whiteboard new <board>`. The skill boots the server as the foreground of a
-   `run_in_background` job, opens the browser, registers the lead and rings the canary.
+1. Run `/whiteboard new <board>`. The skill boots the server with
+   `exec bash <skill dir>/scripts/whiteboard.sh start --name <board> --repo . --scratch .scratchpad`
+   as the foreground of a `run_in_background` job, opens the browser, registers the lead and
+   rings the canary.
 2. **Expect:** the session reports that the canary ring arrived and was fetched back
    before it calls the board ready. `GET /canvas-status` shows
    `doorbell.inbox:true` and `doorbell.canary:"fetched"`.
 3. Confirm the parent: `ps -o ppid= -p <lock.pid>` is the Claude process
-   (`ps -o comm= -p <that ppid>` reads `claude`), with nothing in between.
+   (`ps -o comm= -p <that ppid>` reads `claude`), with nothing in between: `whiteboard.sh`
+   execs node, so neither bash nor npm stays between them. `/canvas-status` shows
+   `ownerIsClaude:true` and `doorbell.mode:"inbox"`.
 
 ## 1. The dry run (decision #64)
 
@@ -56,7 +63,7 @@ Each Send goes from the browser's Send box.
 
 1. With the board up, Send while the session is busy on a long unrelated task, and do
    not let it fetch. **Expect:** the badge reads **rung**, then after the re-rings run
-   out (about 12 minutes) **not heard**, with the notice "Claude has not heard your
+   out (about 12 minutes) **not heard**, with the notice "The agent has not heard your
    message". When the session finally fetches, the badge moves to working.
 
 ## 3. The board's lifetime
@@ -101,6 +108,32 @@ belong to. What this section checks live is the lead's use of the stamps.
    you drew". **Expect:** the lead's selection leaves out the copy, whose `createdBy` names the
    operator.
 
+## 6. Pull mode: the detached boot (any harness without a session inbox)
+
+Run it from a plain terminal, or a harness other than Claude Code. Nothing in it uses an inbox.
+
+1. Boot detached, from a shell you will close afterwards:
+   `bash skills/_incubating/whiteboard/scripts/whiteboard.sh start --detach --name <board> --repo . --scratch .scratchpad`.
+   **Expect:** exit 0 and the board's JSON with `live` set; the lock has `detached:true` and a
+   `parentPid` equal to its own `pid`; the server's output goes to `<board>.log` in the boards folder.
+   `GET /canvas-status` shows `detached:true` and `doorbell.mode:"pull"`.
+2. Open the browser URL and register the lead (SKILL.md §1 step 6); keep the `sessionId` as `<sid>`.
+3. With nothing pending, run `curl -s 'http://127.0.0.1:<port>/pending?sessionId=<sid>&wait=5000'`.
+   **Expect:** about 5 s later, `{"items":[]}`.
+4. Run `curl -s 'http://127.0.0.1:<port>/pending?sessionId=<sid>&wait=110000'` in the foreground and,
+   while it waits, Send "draw a box" from the browser. **Expect:** the call returns at once with
+   the `send` item; the badge goes queued → working, and then done once you
+   `POST /instruction-complete {id, sessionId}`. It never reads **not heard** while a pull is
+   parked or one ran in the last five minutes.
+5. Send again and run no pull for longer than `WHITEBOARD_PULL_GRACE_MS` (5 minutes by default).
+   **Expect:** the badge reads **not heard**, and `doorbell.items` names the Send with reason
+   `not-listening`. The next pull returns it.
+6. Close the shell that ran step 1. **Expect:** `kill -0 <lock.pid>` still succeeds and the board
+   keeps serving: with the owner watch off, the server does not end with its spawner.
+7. Close: `curl -s -X POST http://127.0.0.1:<port>/done -H 'content-type: application/json' -d '{}'`.
+   **Expect:** the board is saved, the server exits, and `<board>.lock` and `<board>.port` are removed.
+   The same call without the JSON content-type answers `415` and closes nothing.
+
 ## Pass criteria (all must hold)
 
 - [ ] The canary is rung and fetched back before the board is called ready, and the
@@ -116,3 +149,6 @@ belong to. What this section checks live is the lead's use of the stamps.
 - [ ] With `crossSessionInbound: hold`, the canary fails loudly.
 - [ ] Shapes carry correct, immutable `createdBy`; the lead selects its own contributions
       from `meta` alone.
+- [ ] Pull mode: a detached board reports `doorbell.mode:"pull"`, a parked `/pending?wait` returns
+      a Send at once, the badge never reads "not heard" while the lead pulls, the server outlives
+      its spawning shell, and `/done` stops it.
