@@ -13,7 +13,7 @@
 //   ?role=human|agent   (default human)   which surface this instance is
 //   ?room=<slug>        (default board)   which sync room to join
 // The bridge launches the headless render-canvas (Playwright) with
-//   ?role=agent&room=<slug>  and opens the operator's browser with
+//   ?role=agent&room=<slug>&canvasKey=<per-process secret>  and opens the operator's browser with
 //   ?role=human&room=<slug>.
 //
 // ── SYNC (v3) ────────────────────────────────────────────────────────────────
@@ -162,8 +162,12 @@ function wsOrigin(): string {
 
 // The bridge control-channel WS. Tag the socket with role + room so the bridge
 // routes exec/presence to the render-canvas and agent-message to the operator.
+// The render-canvas also passes on the `canvasKey` its URL carries: the bridge
+// gives the role=agent slot only to the page it launched itself.
 export function wsUrl(role: Role, room: string): string {
-  const q = `role=${encodeURIComponent(role)}&room=${encodeURIComponent(room)}`
+  let q = `role=${encodeURIComponent(role)}&room=${encodeURIComponent(room)}`
+  const canvasKey = role === 'agent' && typeof location !== 'undefined' ? new URLSearchParams(location.search).get('canvasKey') : null
+  if (canvasKey) q += `&canvasKey=${encodeURIComponent(canvasKey)}`
   return `${wsOrigin()}/events?${q}`
 }
 

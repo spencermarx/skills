@@ -273,7 +273,7 @@ function resolveAuthor(): AuthorIdentity | null {
 function coerceAuthor(raw: unknown): AuthorIdentity | null {
   if (!raw || typeof raw !== 'object') return null
   const o = raw as Record<string, unknown>
-  const name = typeof o.name === 'string' && o.name ? o.name : 'Claude'
+  const name = typeof o.name === 'string' && o.name ? o.name : 'Agent'
   const a: AuthorIdentity = { kind: o.kind === 'human' ? 'human' : 'agent', name }
   if (typeof o.sessionId === 'string') a.sessionId = o.sessionId
   if (typeof o.color === 'string') a.color = o.color
@@ -713,7 +713,7 @@ function App() {
   }, [panelOpen])
 
   // Specialize the browser-tab title to the bound CC session's semantic name so each
-  // session's tab is distinguishable ("Whiteboard: aclarify: whiteboard experience 10"),
+  // session's tab is distinguishable ("Whiteboard: design review"),
   // truncated to keep the tab legible. SESSION is fixed for the life of the page (a
   // board switch is a full navigation via gotoRoom/gotoBoardAt, which reloads and
   // re-resolves it), so this runs once; index.html keeps the plain "Whiteboard" as the
@@ -1175,7 +1175,7 @@ function App() {
         case 'agent-message': {
           const id = typeof frame.id === 'string' && frame.id ? frame.id : newId()
           const ts = typeof frame.ts === 'number' ? frame.ts : Date.now()
-          const name = typeof frame.name === 'string' && frame.name ? frame.name : 'Claude'
+          const name = typeof frame.name === 'string' && frame.name ? frame.name : 'Agent'
           ingest({ id, kind: 'agent', name, text: String(frame.text ?? ''), ts, mine: false })
           break
         }
@@ -2074,7 +2074,7 @@ function App() {
               <span className="wb-notice-dot" aria-hidden="true" />
               <span className="wb-notice-text">
                 {unheardLeadSends.length > 0
-                  ? 'Claude has not heard your message. It is kept and will be delivered when the session picks it up.'
+                  ? 'The agent has not heard your message. It is kept and will be delivered when the session picks it up.'
                   : anyStalled
                     ? 'A collaborator stepped away mid-task. Your message is re-queued and will be picked up when they are back.'
                     : 'No one is on the board yet. Your message is queued and will be delivered when a collaborator joins.'}{' '}

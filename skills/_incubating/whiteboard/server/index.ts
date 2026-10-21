@@ -1,4 +1,3 @@
-#!/usr/bin/env -S npx tsx
 // Whiteboard v4 server (SPEC §3-§8). ONE Node process per board, 127.0.0.1 only. Its first boot
 // takes an OS-assigned ephemeral port and records it in <name>.port, which every later boot of the
 // board binds again (WHITEBOARD_PORT overrides both). Announces the live server in <name>.lock.
@@ -35,6 +34,7 @@ import { chromium, type Browser, type Page } from 'playwright';
 import { PresenceManager, type PresenceState } from './presence.js';
 import { postToInbox } from './inbox.js';
 import { isCanvasDriverFault } from './canvas-fault.js';
+import { canonicalBoardPath, isRoomId, placementRefusal, slugFor } from './boards.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -156,6 +156,17 @@ const NOT_HEARD_AFTER_MS = envMs('WHITEBOARD_NOT_HEARD_AFTER_MS', 120_000);
 const DOORBELL_TICK_MS = envMs('WHITEBOARD_DOORBELL_TICK_MS', 1_000);
 const RING_MIN_GAP_MS = envMs('WHITEBOARD_RING_MIN_GAP_MS', 1_000);
 const APP_DIST = path.resolve(__dirname, '..', 'app', 'dist');
+// [port] Detached mode (scripts/whiteboard.sh start --detach, for a harness that cannot keep the
+// server as the foreground of a background job): no owner watch, so the server lives until /done.
+// The lock still records a numeric parentPid (this process's own), so no boot reads it as a server
+// from before #64.
+const OWNER_WATCH_OFF = process.env.WHITEBOARD_OWNER_WATCH === 'off';
+// [port] With no inbox, the lead listens by long-polling GET /pending?wait=<ms>. Its Sends read
+// "not heard" only after it has neither waited nor pulled within this window.
+const PULL_GRACE_MS = envMs('WHITEBOARD_PULL_GRACE_MS', 300_000);
+// [port] A per-process secret the render-canvas's URL carries, so no other page can take its /events
+// slot. WHITEBOARD_CANVAS_KEY sets it for the tests' stand-in canvases; the skill never sets it.
+const CANVAS_KEY = process.env.WHITEBOARD_CANVAS_KEY || randomUUID();
 
 // --- repo root + scratchpad home (SPEC §8) ---------------------------------
 function findRepoRoot(start: string): string {
@@ -168,9 +179,14 @@ function findRepoRoot(start: string): string {
   }
 }
 
-const REPO_ROOT = findRepoRoot(__dirname);
-const HOME = path.join(REPO_ROOT, '.scratchpad', 'whiteboard');
-fs.mkdirSync(HOME, { recursive: true });
+// [port] The boards folder follows the repository being worked on, never the skill's install folder
+// (a plugin cache, ~/.agents/skills). The repository is WHITEBOARD_REPO, else the git root of the
+// working directory; the boards folder is WHITEBOARD_HOME, else <repository>/.scratchpad/whiteboard.
+// scripts/whiteboard.sh start sets both.
+const REPO_ROOT = canonicalBoardPath(process.env.WHITEBOARD_REPO ? path.resolve(process.env.WHITEBOARD_REPO) : findRepoRoot(process.cwd()));
+const homeDir = process.env.WHITEBOARD_HOME ? path.resolve(process.env.WHITEBOARD_HOME) : path.join(REPO_ROOT, '.scratchpad', 'whiteboard');
+fs.mkdirSync(homeDir, { recursive: true });
+const HOME = canonicalBoardPath(homeDir);
 
 const boardName = (p: string): string => path.basename(p, path.extname(p));
 const imagePathFor = (p: string): string => path.join(HOME, `${boardName(p)}.png`);
@@ -187,12 +203,19 @@ function isDirectory(p: string): boolean {
     return false;
   }
 }
+// [port] A board must also lie inside the repository or the boards folder (boards.mjs's placement
+// rule), and every refusal exits 2, as scripts/whiteboard.sh's own does.
 const BOARD_ENV = process.env.WHITEBOARD_BOARD;
 if (BOARD_ENV !== undefined && !(path.isAbsolute(BOARD_ENV) && BOARD_ENV.endsWith('.tldr') && isDirectory(path.dirname(BOARD_ENV)))) {
   console.error(`[bridge] WHITEBOARD_BOARD must be the board's absolute .tldr path (got ${BOARD_ENV})`);
-  process.exit(1);
+  process.exit(2);
 }
-let activeBoardPath = BOARD_ENV ? path.resolve(BOARD_ENV) : path.join(HOME, 'board.tldr');
+let activeBoardPath = BOARD_ENV ? canonicalBoardPath(BOARD_ENV) : path.join(HOME, 'board.tldr');
+const BOARD_REFUSAL = placementRefusal(activeBoardPath, REPO_ROOT, HOME);
+if (BOARD_REFUSAL) {
+  console.error(`[bridge] WHITEBOARD_BOARD refused: ${BOARD_REFUSAL}`);
+  process.exit(2);
+}
 let activeRoomId = boardName(activeBoardPath);
 let latestImagePath = imagePathFor(activeBoardPath);
 
@@ -226,7 +249,7 @@ function pathForRoom(roomId: string): string {
 }
 
 console.log(`[bridge] repo root: ${REPO_ROOT}`);
-console.log(`[bridge] scratchpad home: ${HOME}`);
+console.log(`[bridge] boards folder: ${HOME}`);
 console.log(`[bridge] active board: ${activeBoardPath} (room '${activeRoomId}')`);
 
 // --- lockfile: discovery + one-server-per-board guard (SPEC §8.3) [v4] ------
@@ -249,8 +272,10 @@ function writeLock(roomId: string = activeRoomId): void {
     ...(OWNER_SESSION ? { ownerSession: OWNER_SESSION } : {}),
     ...(OWNER_SESSION_ID ? { ownerSessionId: OWNER_SESSION_ID } : {}),
     // [v9.11 §8.3 #64] The owning Claude Code process: this server's parent, which it exits with.
-    parentPid: OWNER_PID,
+    // [port] Detached, it exits with nothing: parentPid is its own pid.
+    parentPid: OWNER_WATCH_OFF ? process.pid : OWNER_PID,
     ownerIsClaude: OWNER_IS_CLAUDE,
+    ...(OWNER_WATCH_OFF ? { detached: true } : {}),
   };
   try {
     fs.writeFileSync(lockPathFor(roomId), JSON.stringify(lock));
@@ -326,7 +351,7 @@ const BOOT_PORT = PORT_OVERRIDE ?? RECORDED_PORT ?? 0;
 // serve one board, and a parked waiter on one never meets a Send that lands on the other. [#64] The
 // probe asks the lock's process what the lock means, whether it still holds the board, not only
 // which board it hosts: a process mid-switch hosts the new board while it still holds the old one.
-type LockInfo = { port: number; pid: number; board: string; startedAt: number; ownerSession?: string; ownerSessionId?: string; parentPid?: number; ownerIsClaude?: boolean | null };
+type LockInfo = { port: number; pid: number; board: string; startedAt: number; ownerSession?: string; ownerSessionId?: string; parentPid?: number; ownerIsClaude?: boolean | null; detached?: boolean };
 
 function readLock(roomId: string): LockInfo | null {
   try {
@@ -432,7 +457,7 @@ async function findPre64Servers(): Promise<OldServer[]> {
 
 // The servers found, as the boot's exit line and the switch's refusal both name them.
 function describeOldServers(servers: OldServer[]): string {
-  return `board server from before #64 running: ${servers.map((s) => `pid ${s.pid} on port ${s.port}, board '${s.board}'`).join('; ')}`;
+  return `an older whiteboard server (no parentPid) is running: ${servers.map((s) => `pid ${s.pid} on port ${s.port}, board '${s.board}'`).join('; ')}`;
 }
 
 // [#64] How long a claim waits on an owner that is `releasing` the board, or that is `unknown`, before
@@ -502,31 +527,57 @@ const rooms = new Map<string, RoomEntry>();
 // into a room against it, as the room validates a client's push.
 const ROOM_SCHEMA = createTLSchema();
 
-// Throws when the board's file is not a room snapshot the room can load (switchRoom answers 422).
+// [port] A board file the server cannot load is refused, never replaced: the room is not created, so
+// it is never persisted over the file. Undefined when the file does not exist yet (a new board).
+function readBoardSnapshot(boardPath: string): unknown {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(boardPath, 'utf8');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw new Error(`cannot read ${boardPath}: ${(e as Error).message}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`${boardPath} is not valid JSON: ${(e as Error).message}`);
+  }
+  const snap = parsed as { documents?: unknown; store?: unknown; tldrawFileFormatVersion?: unknown } | null;
+  const isObject = (v: unknown): boolean => typeof v === 'object' && v !== null && !Array.isArray(v);
+  if (!isObject(snap) || !(Array.isArray(snap?.documents) || isObject(snap?.store))) {
+    const hint = isObject(snap) && snap?.tldrawFileFormatVersion !== undefined
+      ? " (it is in tldraw.com's file format, which this server does not import)"
+      : '';
+    throw new Error(`${boardPath} is not a whiteboard room snapshot${hint}`);
+  }
+  return parsed;
+}
+
+// Throws when the board's file is not a room snapshot the room can load (switchRoom answers 422, the
+// boot exits 1).
 function getOrCreateRoom(roomId: string, boardPath: string = pathForRoom(roomId)): RoomEntry {
   const existing = rooms.get(roomId);
   if (existing) return existing;
 
-  let initialSnapshot: unknown;
-  if (fs.existsSync(boardPath)) {
-    try {
-      initialSnapshot = JSON.parse(fs.readFileSync(boardPath, 'utf8'));
-    } catch (e) {
-      console.warn(`[sync] failed to read ${boardPath}: ${(e as Error).message} — starting empty`);
-    }
-  }
+  const initialSnapshot = readBoardSnapshot(boardPath);
 
   const entry: RoomEntry = { room: null as unknown as TLSocketRoom, boardPath, dirty: false, saving: null };
-  entry.room = new TLSocketRoom({
-    // schema omitted -> defaults to createTLSchema() (default tldraw shapes), as ROOM_SCHEMA is.
-    ...(initialSnapshot ? { initialSnapshot: initialSnapshot as never } : {}),
-    onDataChange: () => {
-      entry.dirty = true;
-    },
-    onSessionRemoved: (_room: unknown, args: { numSessionsRemaining: number }) => {
-      console.log(`[sync] room '${roomId}': session left, ${args.numSessionsRemaining} remaining`);
-    },
-  });
+  try {
+    entry.room = new TLSocketRoom({
+      // schema omitted -> defaults to createTLSchema() (default tldraw shapes), as ROOM_SCHEMA is.
+      ...(initialSnapshot ? { initialSnapshot: initialSnapshot as never } : {}),
+      onDataChange: () => {
+        entry.dirty = true;
+      },
+      onSessionRemoved: (_room: unknown, args: { numSessionsRemaining: number }) => {
+        console.log(`[sync] room '${roomId}': session left, ${args.numSessionsRemaining} remaining`);
+      },
+    });
+  } catch (e) {
+    throw new Error(`${boardPath} cannot be loaded as a board: ${(e as Error).message}`);
+  }
+  entry.dirty = false; // [port] loading (and any migration it ran) is not an edit
 
   rooms.set(roomId, entry);
   console.log(`[sync] room '${roomId}' ready (loaded=${!!initialSnapshot}) -> ${boardPath}`);
@@ -587,22 +638,57 @@ async function writeRoomSnapshot(roomId: string, entry: RoomEntry): Promise<void
     if (SAVE_HOLD_MS) await new Promise((r) => setTimeout(r, SAVE_HOLD_MS));
     await fsp.rename(tmp, entry.boardPath);
     console.log(`[sync] persisted room '${roomId}' -> ${entry.boardPath}`);
+    notePersistResult(roomId, entry, null);
   } catch (e) {
     dropTemp(tmp);
-    console.warn(`[sync] persist failed for '${roomId}': ${(e as Error).message}`);
+    entry.dirty = true; // [port] retried on the next tick
+    notePersistResult(roomId, entry, e as Error);
   }
 }
 
-function persistRoomSync(roomId: string, entry: RoomEntry): void {
+// True when the board's file now holds the room.
+function persistRoomSync(roomId: string, entry: RoomEntry): boolean {
   const tmp = snapshotTempPath(entry.boardPath);
   try {
     fs.writeFileSync(tmp, JSON.stringify(entry.room.getCurrentSnapshot()));
     fs.renameSync(tmp, entry.boardPath);
     console.log(`[sync] flushed room '${roomId}' -> ${entry.boardPath}`);
+    notePersistResult(roomId, entry, null);
+    return true;
   } catch (e) {
     dropTemp(tmp);
-    console.warn(`[sync] flush failed for '${roomId}': ${(e as Error).message}`);
+    notePersistResult(roomId, entry, e as Error);
+    return false;
   }
+}
+
+// [port] Whether the room's snapshot can be written beside its board: written to a temp file and
+// dropped, never renamed, so the board on disk is untouched. A failure is said in the panel.
+function canSave(roomId: string, entry: RoomEntry): boolean {
+  const tmp = snapshotTempPath(entry.boardPath);
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(entry.room.getCurrentSnapshot()));
+    return true;
+  } catch (e) {
+    notePersistResult(roomId, entry, e as Error);
+    return false;
+  } finally {
+    dropTemp(tmp);
+  }
+}
+
+// [port] A board that cannot be saved is said in the panel once per run of failures, not only in the
+// log, so the operator can export it before the edits since the last save are lost.
+const persistFailing = new Set<string>();
+function notePersistResult(roomId: string, entry: RoomEntry, error: Error | null): void {
+  if (!error) {
+    if (persistFailing.delete(roomId)) postSystemMessage(`Saving the board works again: ${entry.boardPath}`);
+    return;
+  }
+  console.warn(`[sync] persist failed for '${roomId}': ${error.message}`);
+  if (persistFailing.has(roomId) || shuttingDown) return;
+  persistFailing.add(roomId);
+  postSystemMessage(`The board cannot be saved to ${entry.boardPath} (${error.message}). Export it from the menu until this is fixed; edits since the last save exist only in the open board.`);
 }
 
 // A room still saving keeps its dirty mark for the next tick, so a change made during a save is
@@ -685,7 +771,7 @@ type Message = {
   refetch?: true;
 };
 
-type NotHeardReason = 'no-inbox' | 'inbox-unreachable' | 'unanswered';
+type NotHeardReason = 'not-listening' | 'inbox-unreachable' | 'unanswered';
 
 // [v5.1 §8.2] A Send's lifecycle state, computed server-side (single source of truth) and
 // pushed to the panel. queued: awaiting its recipient. working: held — a worker's live lease OR
@@ -829,7 +915,7 @@ function rewriteMessages(roomId: string): void {
 // ===========================================================================
 // [v5 §8.6] The author identity carried on an exec frame so the app can stamp
 // meta.createdBy / meta.lastEditedBy for the shapes this blob creates. Resolved from the
-// registered session; sessionId may be null and name falls back to 'Claude' when unknown.
+// registered session; sessionId may be null and name falls back to 'Agent' when unknown.
 type ExecAuthor = { kind: 'agent'; sessionId: string | null; name: string; color?: string };
 
 // [render-cap] A page-coordinate region for a zoomed-in export. Absent ⇒ the app
@@ -862,8 +948,8 @@ type FrameToApp =
   // about to drop and the client keeps no local persistence, so unsynced edits after close are lost.
   | { type: 'server-closing'; room: string };
 
+// [port] No `message` frame: a Send enters only through POST /message, which the Origin/Host check guards.
 type FrameFromApp =
-  | { type: 'message'; text?: string; selection?: string[] }
   | { type: 'exec-result'; id: string; ok: boolean; result?: unknown; error?: string }
   | {
       type: 'shapes-result';
@@ -921,6 +1007,14 @@ function refusalFor(headers: http.IncomingHttpHeaders): string | null {
   }
   return null;
 }
+// [port] No response may be framed, so a foreign page cannot load the app in a hidden <iframe>, where
+// its requests would be same-origin and its /events socket a phantom operator. Set first, so a 403
+// carries it too; the 404 and error handlers at the end keep it (Express's own drop every header).
+app.use((_req: Request, res: Response, next: () => void) => {
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+  next();
+});
 app.use((req: Request, res: Response, next: () => void) => {
   const refusal = refusalFor(req.headers);
   if (refusal) {
@@ -932,9 +1026,19 @@ app.use((req: Request, res: Response, next: () => void) => {
 });
 app.use(express.json({ limit: '32mb' }));
 app.use((req: Request, _res: Response, next: () => void) => {
-  console.log(`[bridge] ${req.method} ${req.url}`);
+  console.log(`[bridge] ${req.method} ${req.url.replace(/canvasKey=[^&]*/, 'canvasKey=…')}`); // [port] the key is never logged
   next();
 });
+
+// [port] A control POST only the bridge's own clients make: a JSON content-type cannot be sent
+// cross-site without a CORS preflight, which this server never answers.
+function requireJson(req: Request, res: Response, next: () => void): void {
+  if (!/^application\/json\s*(;|$)/i.test(req.get('content-type') ?? '')) {
+    res.status(415).json({ error: 'content-type: application/json required' });
+    return;
+  }
+  next();
+}
 
 const server = http.createServer(app);
 const eventsWss = new WebSocketServer({ noServer: true });
@@ -958,6 +1062,14 @@ server.on('upgrade', (req, socket, head) => {
   if (pathname === '/events') {
     const role = url.searchParams.get('role') ?? 'agent';
     const room = url.searchParams.get('room') ?? '';
+    // [port] The render-canvas slot drives every agent's exec, shapes and image, so it takes the key
+    // only this server's own Playwright page is given (canvasUrl). A page any site navigates to
+    // /?role=agent loads the app same-origin, but cannot know the key.
+    if (role !== 'human' && url.searchParams.get('canvasKey') !== CANVAS_KEY) {
+      console.warn("[bridge] refused an /events upgrade: the render-canvas socket needs this server's canvas key");
+      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      return;
+    }
     // [#64] An operator tab is admitted only for the room this process hosts, as on /sync: a tab left
     // on another board would otherwise show this board's chat and roster, and count in `humans` on
     // /canvas-status as though it were on this board. The render canvas (role=agent) is unchanged.
@@ -1176,23 +1288,6 @@ function onEventsConnection(ws: WebSocket, role: string, room: string): void {
       return;
     }
     switch (msg.type) {
-      case 'message': {
-        // [v5 §8.5] A WS-origin Send must also become a durable stored Message so pending is a
-        // pure projection over the store; store it, then deliver from the stored record.
-        const stored: Message = {
-          id: randomUUID(),
-          room: activeRoomId,
-          ts: Date.now(),
-          author: { kind: 'human', name: 'You' },
-          text: typeof msg.text === 'string' ? msg.text : '',
-          selection: Array.isArray(msg.selection) ? msg.selection.filter((s): s is string => typeof s === 'string') : [],
-        };
-        appendMessage(stored);
-        broadcastToHumans({ type: 'message', message: stored });
-        deliverInstruction(stored);
-        broadcastAgentStatusIfChanged();
-        break;
-      }
       case 'exec-result':
         settlePending(msg.id, null, { ok: msg.ok, result: msg.result, error: msg.error });
         break;
@@ -1419,7 +1514,7 @@ app.post('/session/register', (req: Request, res: Response) => {
       console.log(`[bridge] session rebind on clientKey: '${cleanName}' -> ${existing.slice(0, 8)}`);
       // [v6] A rebind can re-mark an absent worker present + rename it — refresh the strip.
       broadcastAgentStatusIfChanged();
-      if (key === 'lead') ringSoon(); // [#64] a (re)registered lead is rung for any backlog
+      if (key === 'lead') { leadListenedAt = Date.now(); ringSoon(); } // [#64] a (re)registered lead is rung for any backlog
       res.json({ sessionId: existing });
       return;
     }
@@ -1437,7 +1532,7 @@ app.post('/session/register', (req: Request, res: Response) => {
   console.log(`[bridge] session registered: '${cleanName}' (${sessionId.slice(0, 8)}${key ? `, key=${key}` : ''})`);
   // [v6] A new registered worker joins the roster (or an absent one becomes present) — refresh.
   broadcastAgentStatusIfChanged();
-  if (key === 'lead') ringSoon(); // [#64] drain-on-open: the backlog rings the new lead
+  if (key === 'lead') { leadListenedAt = Date.now(); ringSoon(); } // [#64] drain-on-open: the backlog rings the new lead
   res.json({ sessionId });
 });
 
@@ -2091,17 +2186,10 @@ function unfetchedLeadSends(roomId: string): Message[] {
   return pendingFor(roomId, 'lead').filter((m) => m.receivedAt == null);
 }
 
-app.get('/pending', (req: Request, res: Response) => {
-  const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : '';
-  if (!sessionId) {
-    res.status(400).json({ error: 'query sessionId (the lead session id) required' });
-    return;
-  }
-  if (sessionId !== leadSessionId()) {
-    res.status(403).json({ error: 'sessionId is not the lead session registered on this board' });
-    return;
-  }
-  touch(sessionId);
+// The lead's whole inbound queue, taken: every item the lead has not fetched, oldest first, each Send
+// stamped fetched. `all` adds the Sends it fetched and has not completed. Shared by GET /pending's
+// immediate answer and by a parked lead waiter's (see leadWaiters).
+function takeLeadItems(sessionId: string, all: boolean): LeadItem[] {
   sweepStalledLeases(); // a reclaimed worker lease surfaces as a revive directive below
   const roomId = activeRoomId;
   const now = Date.now();
@@ -2126,7 +2214,7 @@ app.get('/pending', (req: Request, res: Response) => {
   // `?all=1` also returns the Sends this lead already fetched and has not completed (marked
   // `refetch: true`, receipt unchanged): the recovery read after a fetch whose response never
   // arrived, or after an autocompaction dropped a fetched Send from the lead's context.
-  if (req.query.all === '1') {
+  if (all) {
     for (const msg of pendingFor(roomId, 'lead')) {
       if (msg.receivedAt == null || fetched.includes(msg)) continue;
       items.push({ kind: 'send', id: msg.id, instruction: msg.text, selection: msg.selection ?? [], at: msg.ts, for: 'lead', refetch: true });
@@ -2145,7 +2233,65 @@ app.get('/pending', (req: Request, res: Response) => {
     syncBell(Date.now()); // fetched items leave the doorbell: no further rings for them
     broadcastAgentStatusIfChanged();
   }
-  res.json({ items });
+  return items;
+}
+
+// [port] The lead's long-poll, for a harness with no inbox to ring (doorbell.mode "pull"):
+// GET /pending?wait=<ms> parks when nothing is pending and answers as soon as an item arrives, from
+// doorbellTick, which every item source reaches through ringSoon(). Its timeout answers
+// `{"items":[]}`. A Send it hands over is fetched when the response is written; a lead whose response
+// was lost reads it back with ?all=1, as after any lost fetch.
+type LeadWaiter = { res: Response; sessionId: string; all: boolean; timer: NodeJS.Timeout };
+const leadWaiters: LeadWaiter[] = [];
+// When the lead last pulled, waited or registered: what keeps its Sends from reading "not heard"
+// in pull mode (PULL_GRACE_MS).
+let leadListenedAt: number | null = null;
+
+function dropLeadWaiter(w: LeadWaiter): boolean {
+  const i = leadWaiters.indexOf(w);
+  if (i === -1) return false;
+  leadWaiters.splice(i, 1);
+  clearTimeout(w.timer);
+  leadListenedAt = Date.now();
+  return true;
+}
+
+// Answer the lead's parked waiter, if it has one and anything is pending. True when it answered.
+function serveLeadWaiter(leadSid: string): boolean {
+  const w = leadWaiters.find((x) => x.sessionId === leadSid);
+  if (!w) return false;
+  const items = takeLeadItems(w.sessionId, w.all);
+  if (!items.length) return false;
+  dropLeadWaiter(w);
+  w.res.json({ items });
+  return true;
+}
+
+app.get('/pending', (req: Request, res: Response) => {
+  const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : '';
+  if (!sessionId) {
+    res.status(400).json({ error: 'query sessionId (the lead session id) required' });
+    return;
+  }
+  if (sessionId !== leadSessionId()) {
+    res.status(403).json({ error: 'sessionId is not the lead session registered on this board' });
+    return;
+  }
+  touch(sessionId);
+  leadListenedAt = Date.now();
+  const all = req.query.all === '1';
+  const items = takeLeadItems(sessionId, all);
+  const waitRaw = Number(req.query.wait);
+  const wait = Number.isFinite(waitRaw) ? Math.min(Math.max(waitRaw, 0), LONGPOLL_MS) : 0;
+  if (items.length || wait === 0) {
+    res.json({ items });
+    return;
+  }
+  const w: LeadWaiter = { res, sessionId, all, timer: setTimeout(() => {
+    if (dropLeadWaiter(w)) res.json({ items: [] });
+  }, wait) };
+  leadWaiters.push(w);
+  res.on('close', () => { dropLeadWaiter(w); }); // a lead that hung up is no longer waiting
 });
 
 // ===========================================================================
@@ -2320,9 +2466,12 @@ function doorbellTick(): void {
   if (bell.size === 0) return;
   const leadSid = leadSessionId();
   if (!leadSid) return; // nothing can name a fetch yet: items stay queued until the lead registers
+  if (serveLeadWaiter(leadSid)) return; // [port] a parked lead takes them now: nothing left to ring
   const entries = [...bell.values()];
   if (!INBOX_SOCKET) {
-    markNotHeard(entries, 'no-inbox', now);
+    // [port] Pull mode: an item is heard by the lead's next pull, unless the lead has stopped pulling.
+    const listening = leadWaiters.length > 0 || (leadListenedAt != null && now - leadListenedAt <= PULL_GRACE_MS);
+    if (!listening) markNotHeard(entries, 'not-listening', now);
     return;
   }
   markNotHeard(entries.filter((e) => isExhausted(e, now)), 'unanswered', now);
@@ -2400,6 +2549,9 @@ app.post('/canary', async (req: Request, res: Response) => {
 function doorbellStatus(): Record<string, unknown> {
   return {
     inbox: !!INBOX_SOCKET,
+    // [port] How the lead hears its items: rung on its inbox, or pulled by its long-poll.
+    mode: INBOX_SOCKET ? 'inbox' : 'pull',
+    leadWaiting: leadWaiters.length > 0,
     lead: !!leadSessionId(),
     rings: ringCounter,
     lastRingAt,
@@ -2629,6 +2781,10 @@ app.post('/message', (req: Request, res: Response) => {
 // [v4 §8.2] Panel read model: full history (or the tail after `since`) ascending by ts.
 app.get('/messages', (req: Request, res: Response) => {
   const room = typeof req.query.room === 'string' && req.query.room ? req.query.room : activeRoomId;
+  if (!isRoomId(room)) {
+    res.status(400).json({ error: `invalid room id '${room}'` }); // [port] never a path into another folder
+    return;
+  }
   const sinceRaw = req.query.since;
   const since = typeof sinceRaw === 'string' && sinceRaw !== '' ? Number(sinceRaw) : null;
   // [#64] Another room's log is read from disk and never cached: this process does not own it, and
@@ -2646,7 +2802,7 @@ app.get('/messages', (req: Request, res: Response) => {
 // lead's doorbell; the lead fetches it as a teardown item through GET /pending. Idempotent — setting it twice is a no-op 200. `room`
 // optional: defaults to this process's single active board. [#64] A `room` this process does not host
 // is a 409, as on /message: a stale tab's close would otherwise flag a board this server is not on.
-app.post('/request-teardown', (req: Request, res: Response) => {
+app.post('/request-teardown', requireJson, (req: Request, res: Response) => {
   const { room } = (req.body ?? {}) as { room?: unknown };
   const roomId = typeof room === 'string' && room ? room : activeRoomId;
   if (!hosts(roomId)) {
@@ -2723,10 +2879,10 @@ function pruneExecIdem(): void {
 
 // [v5 §8.6] Resolve the exec's author identity from the registered session (name/color),
 // carried on the exec frame so the app stamps meta.createdBy/lastEditedBy. Unknown session ->
-// { kind:'agent', sessionId, name:'Claude', color: undefined }. The server never stamps meta.
+// { kind:'agent', sessionId, name:'Agent', color: undefined }. The server never stamps meta.
 function resolveExecAuthor(sessionId: string | null): ExecAuthor {
   const info = sessionId ? presence.info(sessionId) : undefined;
-  return { kind: 'agent', sessionId, name: info?.name ?? 'Claude', color: info?.color };
+  return { kind: 'agent', sessionId, name: info?.name ?? 'Agent', color: info?.color };
 }
 
 // [v9.5 §5] Honest /exec contract + per-exec sync-corruption detection.
@@ -3001,7 +3157,7 @@ app.post('/agent-message', (req: Request, res: Response) => {
   }
   // [v4 §8.2] Store the agent utterance attributed to the registered session (name/color).
   const info = sid ? presence.info(sid) : undefined;
-  const author: MessageAuthor = { kind: 'agent', name: info?.name ?? 'Claude' };
+  const author: MessageAuthor = { kind: 'agent', name: info?.name ?? 'Agent' };
   if (sid) author.sessionId = sid;
   if (info?.color) author.color = info.color;
   const message: Message = { id, room: activeRoomId, ts: Date.now(), author, text };
@@ -3025,7 +3181,15 @@ app.post('/snapshot', (_req: Request, res: Response) => {
 });
 
 app.get('/snapshot', async (req: Request, res: Response) => {
-  const target = req.query.path ? path.resolve(String(req.query.path)) : activeBoardPath;
+  let target = activeBoardPath;
+  if (req.query.path) {
+    const placed = boardFromRequest(req.query.path);
+    if (!placed.ok) {
+      res.status(placed.status).json({ error: placed.error });
+      return;
+    }
+    target = placed.path;
+  }
   try {
     const raw = await fsp.readFile(target, 'utf8');
     res.json({ document: JSON.parse(raw) });
@@ -3039,6 +3203,18 @@ app.get('/snapshot', async (req: Request, res: Response) => {
 // ===========================================================================
 // BOARD open / new / discovery (SPEC §8)
 // ===========================================================================
+// [port] A board path a request names: a relative path resolves against the repository, and the file
+// must be a .tldr inside the repository or the boards folder, in a folder that already exists
+// (boards.mjs's placement rule), so no request reads or writes a file anywhere else.
+type PlacedBoard = { ok: true; path: string } | { ok: false; status: number; error: string };
+function boardFromRequest(raw: unknown): PlacedBoard {
+  if (typeof raw !== 'string' || !raw) return { ok: false, status: 400, error: 'a board path is required' };
+  const boardPath = canonicalBoardPath(path.resolve(REPO_ROOT, raw));
+  const refusal = placementRefusal(boardPath, REPO_ROOT, HOME);
+  if (refusal) return { ok: false, status: refusal.startsWith('outside') ? 403 : 400, error: refusal };
+  return { ok: true, path: boardPath };
+}
+
 // [#64] An in-app switch is one transaction, serialized with execs (runExclusive): an exec captures
 // activeRoomId and then awaits, so a switch landing mid-exec would confirm its write against the
 // released room and could start a recovery against the wrong one. The one-server check runs in here
@@ -3064,6 +3240,7 @@ type SwitchOutcome =
   | { kind: 'busy'; owner: LockOwner } // the owner is releasing it, or does not answer, past the wait
   | { kind: 'old'; servers: OldServer[] } // a server from before #64 runs: nothing claimed or released
   | { kind: 'unloadable'; error: string } // the target's file is not a room snapshot
+  | { kind: 'unsaved'; error: string } // [port] the board left cannot be saved: nothing switched
   | { kind: 'failed'; error: string } // anything else that threw before the commit's answer
   | { kind: 'switched' };
 
@@ -3096,6 +3273,17 @@ function switchRoom(roomId: string, boardPath: string): Promise<SwitchOutcome> {
           answer({ kind: 'unloadable', error: `board cannot be loaded: ${(e as Error).message}` });
           return;
         }
+      }
+      // [port] A board left that cannot be saved stays served and locked with nothing switched, rather
+      // than released with its edits since the last save lost. Checked before the commit by writing its
+      // snapshot beside it and dropping that copy (canSave), so the release keeps its one final flush.
+      const prev = roomId !== prevRoom ? rooms.get(prevRoom) : undefined;
+      if (prev && !canSave(prevRoom, prev)) {
+        rooms.get(roomId)?.room.close();
+        rooms.delete(roomId);
+        removeLock(roomId);
+        answer({ kind: 'unsaved', error: `the board '${prevRoom}' cannot be saved, so it stays open here; export it, then try again` });
+        return;
       }
       // 2. Commit.
       beginSwitch();
@@ -3216,6 +3404,10 @@ function answerSwitch(res: Response, verb: 'open' | 'new', roomId: string, board
       console.error(`[bridge] board ${verb} -> '${roomId}' refused: ${outcome.error}`);
       res.status(422).json({ error: outcome.error });
       return;
+    case 'unsaved':
+      console.error(`[bridge] board ${verb} -> '${roomId}' refused: ${outcome.error}`);
+      res.status(503).json({ error: outcome.error });
+      return;
     case 'failed':
       console.error(`[bridge] board ${verb} -> '${roomId}' failed: ${outcome.error}`);
       res.status(500).json({ error: outcome.error });
@@ -3232,7 +3424,12 @@ app.post('/board/open', async (req: Request, res: Response) => {
     res.status(400).json({ error: 'body.path required' });
     return;
   }
-  const boardPath = path.resolve(p);
+  const placed = boardFromRequest(p);
+  if (!placed.ok) {
+    res.status(placed.status).json({ error: placed.error });
+    return;
+  }
+  const boardPath = placed.path;
   const roomId = boardName(boardPath);
   // [v8 §8.3] One server per board. If a live foreign process already hosts this board, DO NOT
   // switch in-process (that would steal its lock -> split-brain). Hand the client that process's
@@ -3250,7 +3447,7 @@ app.post('/board/new', async (req: Request, res: Response) => {
     res.status(400).json({ error: 'body.name required' });
     return;
   }
-  const safe = name.replace(/[^\w.-]+/g, '-');
+  const safe = slugFor(name); // [port] the one name rule, shared with scripts/whiteboard.sh --name
   const boardPath = path.join(HOME, `${safe}.tldr`);
   // [v8 §8.3] Same one-server guard as /board/open: a "new" board whose name collides with a
   // live board must attach to that owner, never steal its lock.
@@ -3320,7 +3517,9 @@ let launcherBoot = false;
 // verify that resumes after its attempt was given up on finds a newer canvas and acts on nothing.
 let canvasGen = 0;
 
-const canvasUrl = (roomId: string): string => `http://${HOST}:${assignedPort}/?role=agent&room=${encodeURIComponent(roomId)}`;
+// [port] The URL carries the canvas key; logs name canvasLogUrl, which does not.
+const canvasLogUrl = (roomId: string): string => `http://${HOST}:${assignedPort}/?role=agent&room=${encodeURIComponent(roomId)}`;
+const canvasUrl = (roomId: string): string => `${canvasLogUrl(roomId)}&canvasKey=${encodeURIComponent(CANVAS_KEY)}`;
 
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -4202,7 +4401,7 @@ async function launchRenderCanvas(roomId: string, gen: number): Promise<void> {
   const url = canvasUrl(roomId);
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: CANVAS_NAV_TIMEOUT_MS });
   if (!current()) throw superseded();
-  console.log(`[canvas] render-canvas launched at ${url}`);
+  console.log(`[canvas] render-canvas launched at ${canvasLogUrl(roomId)}`);
   if (++launchCount === WEDGE_LAUNCH) wedgeForTest(page, `launch ${launchCount}`);
   await verifyCanvasSynced(roomId, 'launch', page, current, since);
 }
@@ -4248,11 +4447,11 @@ async function navigateRenderCanvas(roomId: string): Promise<boolean> {
   if (!page) throw new Error('no render-canvas to navigate');
   const gen = canvasGen;
   const url = canvasUrl(roomId);
-  if (FAIL_NAV) throw new Error(`page.goto: navigation to ${url} failed (WHITEBOARD_FAIL_NAV)`);
+  if (FAIL_NAV) throw new Error(`page.goto: navigation to ${canvasLogUrl(roomId)} failed (WHITEBOARD_FAIL_NAV)`);
   const since = renderCanvasSocket;
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: CANVAS_NAV_TIMEOUT_MS });
   failParkedRequests('render-canvas switched boards; retry'); // the page they were sent to is gone
-  console.log(`[canvas] render-canvas navigated to ${url}`);
+  console.log(`[canvas] render-canvas navigated to ${canvasLogUrl(roomId)}`);
   if (wedgeNavRoom && wedgeNavRoom === roomId) { wedgeNavRoom = ''; wedgeForTest(page, `navigation to ${roomId}`); }
   await verifyCanvasSynced(roomId, 'navigate', page, () => gen === canvasGen, since);
   return true;
@@ -4304,6 +4503,8 @@ app.get('/canvas-status', (_req: Request, res: Response) => {
     // [#64] Whether this server's parent is the session's Claude process (CLAUDE_PID): false means
     // the boot shape is wrong and the canary will refuse; null means no CLAUDE_PID was inherited.
     ownerIsClaude: OWNER_IS_CLAUDE,
+    // [port] True when started with WHITEBOARD_OWNER_WATCH=off: it lives until /done.
+    detached: OWNER_WATCH_OFF,
     // [v9.1 §8.2 #53] The operator pressed the confirm-gated close affordance and the lead has not
     // yet consumed the teardown directive — the app reflects a "closing…" state from this.
     teardownRequested: isTeardownRequested(activeRoomId),
@@ -4371,7 +4572,8 @@ function flushFinalState(): void {
 // it keeps a server from ringing a dead session's socket path, which a later session reusing the
 // pid could own.
 const OWNER_WATCH_MS = envMs('WHITEBOARD_OWNER_WATCH_MS', 2_000);
-const ownerWatch = setInterval(() => {
+// [port] Off when detached (WHITEBOARD_OWNER_WATCH=off).
+const ownerWatch = OWNER_WATCH_OFF ? undefined : setInterval(() => {
   if (process.ppid === OWNER_PID && pidAlive(OWNER_PID)) return;
   console.log(`[bridge] owner process ${OWNER_PID} is gone (parent now ${process.ppid}); saving the board and exiting`);
   void shutdown(0);
@@ -4409,7 +4611,7 @@ async function shutdown(code = 0): Promise<void> {
   process.exit(code);
 }
 
-app.post('/done', (_req: Request, res: Response) => {
+app.post('/done', requireJson, (_req: Request, res: Response) => {
   // [v9.1 §9 #53] Defensive cleanup: clear the teardown flag on the graceful close. In the directive
   // path it is already cleared on consumption; this also covers the natural-language-Send fallback,
   // where the lead reaches /done without a directive ever being surfaced.
@@ -4457,6 +4659,14 @@ process.on('uncaughtException', (e) => {
 // Static app + boot
 // ===========================================================================
 app.use('/', express.static(APP_DIST));
+// [port] Express's own final handler removes every header before it answers a miss or an error, which
+// would drop the framing headers. These two answer both instead, so they keep them.
+app.use((_req: Request, res: Response) => {
+  res.status(404).json({ error: 'not found' });
+});
+app.use((err: Error & { status?: number }, _req: Request, res: Response, _next: () => void) => {
+  res.status(err.status ?? 500).json({ error: err.message });
+});
 
 // [v4 §8.3] Bind BOOT_PORT and read the real port back. [v9.11 §8.3 #64] BOOT_PORT is a non-zero
 // WHITEBOARD_PORT, else the board's recorded `<name>.port`, else 0 (OS-assigned). The boot command
@@ -4531,6 +4741,14 @@ const bootVerdict = await awaitBoardFree(activeRoomId, (lock, state) => {
 });
 if (bootVerdict.owner) refuseBoot(bootVerdict.owner);
 const BOOT_STALE_PID = bootVerdict.stalePid;
+// [port] A board file this server cannot load exits 1 before anything is bound or written, so it is
+// never replaced by an empty board.
+try {
+  getOrCreateRoom(activeRoomId);
+} catch (e) {
+  console.error(`[bridge] ${(e as Error).message}; not starting`);
+  process.exit(1);
+}
 server.listen(BOOT_PORT, HOST);
 
 // Presence-state helper re-export used by nothing else; keep the type surface visible.

@@ -1,22 +1,22 @@
-// Board identity, placement and the board lock, shared by the bridge (index.ts), scripts/whiteboard.sh
-// and the tests, so none of them can drift from the others.
+// Board naming, placement and liveness, shared by the bridge (index.ts), scripts/whiteboard.sh and the
+// tests, so none of them can drift from the others. Plain ESM with no dependencies, so whiteboard.sh
+// and the tests run it with bare node.
 //
-// A board IS its .tldr file's canonical absolute path. The room id, and the names of the board's
-// files in the boards folder (lock, chat log, render, server log), all derive from that path, so
-// two boards that share a file name never share a room, and a board keeps one lock however it was
-// opened. Plain ESM with no dependencies, so whiteboard.sh and the tests run it with bare node.
+// A board is a .tldr file; its room id is the file's name without `.tldr`, and its own files (lock,
+// port record, chat log, recipients, render, server log) live in the boards folder under that name.
+// The lock and its one-server check belong to the bridge (index.ts, claimLock); this file only reads
+// a lock to say whether a live server holds it.
 //
 //   node boards.mjs (--board <file.tldr> | --name <name>) --home <boards folder> --repo <repository>
-//     prints {board, name, room, lock, messages, png, log, live} as JSON. `--name` resolves to
-//     <boards folder>/<slugFor(name)>.tldr. `live` is the lock when a server holding it is running
-//     (pid alive and its port answers for this room), else null. Exit 0 when nothing live holds
-//     the board, 4 when a live server does, 2 on a bad argument or a board outside the repository
-//     and the boards folder or in a folder that does not exist (refused before anything is created).
+//     prints {board, name, room, lock, port, messages, recipients, png, log, live} as JSON. `--name`
+//     resolves to <boards folder>/<slugFor(name)>.tldr. `live` is the lock when a live server holds
+//     the board (see liveOwner), else null. Exit 0 when nothing live holds it, 3 when a live server
+//     does, 2 on a bad argument or a board the placement rule refuses (refused before anything is
+//     created; the reason is on stderr).
 
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -71,20 +71,16 @@ export function displayName(p) {
 }
 
 /**
- * The room id for a canonical board path: a slug of its name for legibility, plus a hash of the
- * whole path for identity. Always matches isRoomId.
- * @param {string} canonicalPath
+ * A board's room id, as the bridge names it: its file name without `.tldr`.
+ * @param {string} boardPath
  * @returns {string}
  */
-export function roomIdFor(canonicalPath) {
-  const slug = displayName(canonicalPath).replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'board';
-  const hash = createHash('sha256').update(canonicalPath).digest('hex').slice(0, 10);
-  return `${slug}-${hash}`;
+export function roomFor(boardPath) {
+  return displayName(boardPath);
 }
 
 /**
- * A room id the bridge accepts from a client: the `[\w.-]` alphabet `/board/new` slugs names
- * into, never a path separator, never `..`.
+ * A room id the bridge accepts from a client: never a path separator, never `..`.
  * @param {unknown} id
  * @returns {id is string}
  */
@@ -107,9 +103,9 @@ export function isWithin(dir, p) {
  * Why a canonical board path may not be a board, or null when it may: it must be a .tldr file
  * inside the repository or the boards folder, and its folder must already exist, since a board the
  * server could never save is refused rather than lost. The boards folder itself is the exception:
- * `whiteboard.sh start` and the server create it. One rule for `locate`, `start`, the server's boot
- * and `/board/open`, so each refuses before anything is created. All three paths must already be
- * canonical.
+ * `whiteboard.sh start` and the server create it. One rule for `locate`, `start`, the server's boot,
+ * `/board/open` and `/snapshot`, so each refuses before anything is created. All three paths must
+ * already be canonical.
  * @param {string} board
  * @param {string} repo
  * @param {string} home
@@ -131,17 +127,19 @@ export function placementRefusal(board, repo, home) {
 export function sidecarPaths(home, room) {
   return {
     lock: path.join(home, `${room}.lock`),
+    port: path.join(home, `${room}.port`),
     messages: path.join(home, `${room}.messages.jsonl`),
+    recipients: path.join(home, `${room}.recipients.json`),
     png: path.join(home, `${room}.png`),
     log: path.join(home, `${room}.log`),
   };
 }
 
 /**
- * The lock: `room` is the room id, `path` the board file. `port` is 0 while the server that
- * claimed it is still starting.
- * @typedef {{ port: number, pid: number, room: string, path?: string, name?: string,
- *   startedAt: number, ownerSession?: string, ownerSessionId?: string }} LockInfo
+ * The lock the bridge writes: `board` is the room id; `parentPid` the process it exits with (its own
+ * pid when `detached`).
+ * @typedef {{ port: number, pid: number, board?: string, startedAt?: number, ownerSession?: string,
+ *   ownerSessionId?: string, parentPid?: number, ownerIsClaude?: boolean | null, detached?: boolean }} LockInfo
  */
 
 /**
@@ -161,7 +159,7 @@ export function readLock(lockPath) {
 
 /**
  * kill(pid, 0) probes without signalling: ESRCH is gone, EPERM is alive under another user. A
- * live pid alone proves nothing (pids are reused); probeCanvasStatus is the confirmation.
+ * live pid alone proves nothing (pids are reused); the /canvas-status probe is the confirmation.
  * @param {number} pid
  * @returns {boolean}
  */
@@ -175,18 +173,15 @@ export function pidAlive(pid) {
 }
 
 /**
- * Whether a whiteboard server on `port` answers and is hosting `room`: only a 200 naming the room
- * counts. Never throws. The bridge's client check cannot refuse it, since it addresses
- * 127.0.0.1:<port> and sends no Origin and no Sec-Fetch-* header. So any other answer, a 403
- * included, comes from something that is not this board's server (a reused pid's port), and the
- * lock reads as stale.
+ * Whether a whiteboard server on `port` answers within 3 s and hosts `room`: only a 200 whose
+ * `activeRoom` is the room counts. Never throws.
  * @param {number} port
  * @param {string} room
  * @returns {Promise<boolean>}
  */
-export function probeCanvasStatus(port, room) {
+function hostsRoom(port, room) {
   return new Promise((resolve) => {
-    const req = http.get({ host: '127.0.0.1', port, path: '/canvas-status', timeout: 1000 }, (res) => {
+    const req = http.get({ host: '127.0.0.1', port, path: '/canvas-status', timeout: 3000 }, (res) => {
       if (res.statusCode !== 200) { res.resume(); resolve(false); return; }
       let raw = '';
       res.on('data', (c) => (raw += c));
@@ -204,105 +199,19 @@ export function probeCanvasStatus(port, room) {
 }
 
 /**
- * The lock of a live server hosting `room`, or null: no lock, a stale lock (dead pid, or a port
- * that no longer answers for this room), or a lock held by `selfPid`.
+ * The lock of a live server hosting `room`, or null. Live is the skill's attach check: the lock's
+ * pid is alive, its parentPid is a number and alive, and its port's /canvas-status names the room.
+ * A lock with no parentPid is from an older server, which the bridge's own boot refuses to run
+ * beside (exit 4); it never reads as live here.
  * @param {string} home
  * @param {string} room
- * @param {number} [selfPid]
  * @returns {Promise<LockInfo | null>}
  */
-export async function liveOwner(home, room, selfPid) {
+export async function liveOwner(home, room) {
   const lock = readLock(sidecarPaths(home, room).lock);
-  if (!lock || !lock.port || lock.pid === selfPid || !pidAlive(lock.pid)) return null;
-  return (await probeCanvasStatus(lock.port, room)) ? lock : null;
-}
-
-// How long a lock claimed by a server that has not yet listened (port 0) counts as held while its
-// pid lives. Boot takes a second or two; past this the claimant is presumed hung and its lock stale.
-const BOOT_GRACE_MS = 60_000;
-
-/**
- * Who holds a lock against `selfPid`: a live server answering for the room, or one still starting
- * (port 0, pid alive, claimed within BOOT_GRACE_MS). Null when nobody does, or the lock is ours.
- * @param {string} lockPath
- * @param {string} room
- * @param {number} selfPid
- * @returns {Promise<LockInfo | null>}
- */
-async function lockHolder(lockPath, room, selfPid) {
-  const lock = readLock(lockPath);
-  if (!lock || lock.pid === selfPid || !pidAlive(lock.pid)) return null;
-  if (!lock.port) return Date.now() - Number(lock.startedAt) < BOOT_GRACE_MS ? lock : null;
-  return (await probeCanvasStatus(lock.port, room)) ? lock : null;
-}
-
-/** @param {string} p */
-function readRaw(p) {
-  try {
-    return fs.readFileSync(p, 'utf8');
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Write a file whole: a reader sees the old contents or the new, never a partial write.
- * @param {string} file
- * @param {string} body
- */
-function writeWhole(file, body) {
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, body);
-  fs.renameSync(tmp, file);
-}
-
-/**
- * Claim a board's lock exclusively. The lock is created by hard-linking a fully written temp file
- * into place: an exclusive create, like open(lock, 'wx'), that never shows a reader a half-written
- * lock. On EEXIST the holder is probed: a live or starting server keeps it ({ok:false, holder}); a
- * stale lock is removed, only if it has not changed since it was judged stale, and the claim is
- * retried once. A lock this process already holds is rewritten with `content`.
- * @param {string} lockPath
- * @param {string} room
- * @param {LockInfo} content
- * @returns {Promise<{ ok: true } | { ok: false, holder: LockInfo | null }>}
- */
-export async function claimLock(lockPath, room, content) {
-  const body = JSON.stringify(content);
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const tmp = `${lockPath}.${content.pid}.claim`;
-    fs.writeFileSync(tmp, body);
-    try {
-      fs.linkSync(tmp, lockPath);
-      return { ok: true };
-    } catch (e) {
-      if (/** @type {NodeJS.ErrnoException} */ (e).code !== 'EEXIST') throw e;
-    } finally {
-      fs.rmSync(tmp, { force: true });
-    }
-    const seen = readRaw(lockPath);
-    if (readLock(lockPath)?.pid === content.pid) {
-      writeWhole(lockPath, body);
-      return { ok: true };
-    }
-    const holder = await lockHolder(lockPath, room, content.pid);
-    if (holder) return { ok: false, holder };
-    if (seen !== null && readRaw(lockPath) === seen) fs.rmSync(lockPath, { force: true });
-  }
-  return { ok: false, holder: readLock(lockPath) };
-}
-
-/**
- * Rewrite a lock this process holds, to fill in the port once it listens. Returns false, and
- * writes nothing, when the lock is no longer ours.
- * @param {string} lockPath
- * @param {LockInfo} content
- * @returns {boolean}
- */
-export function updateLock(lockPath, content) {
-  if (readLock(lockPath)?.pid !== content.pid) return false;
-  writeWhole(lockPath, JSON.stringify(content));
-  return true;
+  if (!lock || !lock.port || !pidAlive(lock.pid)) return null;
+  if (typeof lock.parentPid !== 'number' || !pidAlive(lock.parentPid)) return null;
+  return (await hostsRoom(lock.port, room)) ? lock : null;
 }
 
 function isMain() {
@@ -337,8 +246,8 @@ if (isMain()) {
     console.error(`boards.mjs: ${refusal}`);
     process.exit(2);
   }
-  const room = roomIdFor(board);
+  const room = roomFor(board);
   const live = await liveOwner(home, room);
   console.log(JSON.stringify({ board, name: displayName(board), room, ...sidecarPaths(home, room), live }));
-  process.exit(live ? 4 : 0);
+  process.exit(live ? 3 : 0);
 }
