@@ -2,7 +2,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
-  <img src="docs/assets/logo-light.svg" alt="Skills, for any agent that reads SKILL.md" width="720">
+  <img src="docs/assets/logo-light.svg" alt="Aclarify Skills: for any agent that reads SKILL.md" width="720">
 </picture>
 
 <p><b>Agent skills for planning, investigating, building, writing and measuring your own harness.</b></p>
@@ -26,13 +26,14 @@
 </div>
 
 A skill is a folder of instructions that your agent loads when a task matches
-it. These skills interview a plan until it holds, find the cause of a failure,
-record decisions and hand a session over. Others draft and critique writing, or
-check that your own skills fire when they should.
+it. Ask for a plan review and `grill-me` interviews you, one round at a time,
+until every branch is settled. Hit a bug nobody can explain and
+`first-principles-investigation` tests rival causes against the real system
+until one survives. The [catalog](#catalog) has the rest.
 
 - **Portable.** Each skill describes actions ("read the file", "run in the
-  shell") rather than one harness's tools, so it reads the same in every
-  harness, the agent tool you run.
+  shell") rather than naming one harness's tools, so it reads the same in
+  Claude Code, Codex, Copilot, Cursor or OpenCode.
 - **Method, not product.** A skill teaches a kind of work, such as interviewing
   a plan or investigating a failure. It joins the catalog only when it fixes a
   failure someone watched an agent make.
@@ -107,9 +108,8 @@ Replace `<agent>` with your harness's id, such as `cursor`, `opencode`,
 ### Set up each repository
 
 Run the `setup-aclarify-skills` skill once in each repository. It starts only
-when you call it by name, such as `/setup-aclarify-skills` (or
-`/aclarify-skills:setup-aclarify-skills` through the Claude Code plugin). It
-shows you a draft before it writes anything, and it:
+when you call it by name, as `/setup-aclarify-skills`. It shows you a draft
+before it writes anything, and it:
 
 - asks where your issues, glossary, decision records and scratch files live;
 - writes the answers to `docs/agents/` and adds an `## Agent skills` block to
@@ -126,10 +126,11 @@ Run it again with `check` to re-check the tools and change nothing else.
 ## Start here
 
 Type a skill as a command, or describe the job and let your agent choose.
-Through the Claude Code plugin, add the prefix: `/aclarify-skills:grill-me`.
+The Claude Code plugin also accepts the full name, such as
+`/aclarify-skills:grill-me`, when another skill shares the short one.
 
 | When you want to | Type |
-|---|---|
+|:---|:---|
 | Settle a plan before anyone builds it | [`/grill-me`](skills/planning/grill-me) |
 | Find the cause of a failure nobody can explain | [`/first-principles-investigation`](skills/engineering/first-principles-investigation) |
 | Build a feature or fix a bug test-first | [`/tdd`](skills/engineering/tdd) |
@@ -171,8 +172,8 @@ is left to decide.
 The skills name each other, so one hands its work to the next where it is
 installed.
 
-- `grill-with-docs` → `grill-me` → `domain-modeling` → `decision-record`: settle
-  a plan, then record its terms and decisions.
+- `grill-me` → `domain-modeling` → `decision-record`, run in order by
+  `grill-with-docs`: settle a plan, then record its terms and decisions.
 - `triage` → `first-principles-investigation` → `grill-with-docs`: verify an
   issue, find its cause, then shape it into an agent-ready brief.
 - `gather-argument-material` → `draft-argued-piece` → `humanize` →
@@ -185,7 +186,7 @@ Skills marked <kbd>/</kbd> start only when you type them. The rest also start
 when a task matches.
 
 | Family | For |
-|---|---|
+|:---|:---|
 | [Core](#core) | Setting a repository up, keeping working files out of git, writing for a reader and handing work over |
 | [Planning](#planning) | Settling a plan before anyone builds it, and recording what was settled |
 | [Engineering](#engineering) | Finding the cause, building test-first, committing cleanly and taking a pull request to green |
@@ -198,10 +199,10 @@ when a task matches.
 ### Core
 
 | Skill | Use it to |
-|---|---|
-| [`setup-aclarify-skills`](skills/core/setup-aclarify-skills) <kbd>/</kbd> | Configure a repository for these skills and install the tools they need |
-| [`conveying-clearly`](skills/core/conveying-clearly) | Write a message a colleague reads once and acts on: point first, every term grounded |
-| [`scratchpad`](skills/core/scratchpad) | Keep temporary working files in one git-ignored folder, and find or clean them later |
+|:---|:---|
+| [`setup-aclarify-skills`](skills/core/setup-aclarify-skills) <kbd>/</kbd> | Configure a repository for these skills and the tools they need |
+| [`conveying-clearly`](skills/core/conveying-clearly) | Write a message a colleague reads once and acts on, point first |
+| [`scratchpad`](skills/core/scratchpad) | Keep working files in one git-ignored folder, and find or clean them later |
 | [`handoff`](skills/core/handoff) | Compact a session into a document a fresh agent can resume from |
 | [`create-report`](skills/core/create-report) | Render a markdown record as a self-contained visual HTML report |
 
@@ -210,7 +211,7 @@ when a task matches.
 ### Planning
 
 | Skill | Use it to |
-|---|---|
+|:---|:---|
 | [`grill-me`](skills/planning/grill-me) | Interview you about a plan, one round of questions at a time, until every branch settles |
 | [`grill-with-docs`](skills/planning/grill-with-docs) | Grill a plan, then record what it settled as glossary entries and decision records |
 | [`domain-modeling`](skills/planning/domain-modeling) | Pin down a project's vocabulary and spot the design decisions worth recording |
@@ -224,7 +225,7 @@ when a task matches.
 ### Engineering
 
 | Skill | Use it to |
-|---|---|
+|:---|:---|
 | [`first-principles-investigation`](skills/engineering/first-principles-investigation) | Test competing hypotheses against the real system until one cause survives |
 | [`prototype`](skills/engineering/prototype) | Build a throwaway prototype that answers one design question |
 | [`arch-board`](skills/engineering/arch-board) | Convene expert personas to debate a hard design fork and return a cited verdict |
@@ -242,7 +243,7 @@ when a task matches.
 ### Writing
 
 | Skill | Use it to |
-|---|---|
+|:---|:---|
 | [`gather-argument-material`](skills/writing/gather-argument-material) | Interview you and collect raw fragments for a piece, before any outline |
 | [`draft-argued-piece`](skills/writing/draft-argued-piece) | Draft an essay, post or guide block by block from the collected material |
 | [`draft-conversion-copy`](skills/writing/draft-conversion-copy) | Draft a cold email, landing page or ad: copy that makes an ask |
@@ -254,9 +255,9 @@ when a task matches.
 ### Strategy
 
 | Skill | Use it to |
-|---|---|
+|:---|:---|
 | [`strategic-brief`](skills/strategy/strategic-brief) | Test demand for an undrafted idea, write the brief and call go or no-go |
-| [`rice-prioritization`](skills/strategy/rice-prioritization) | Rank candidates with RICE through a deterministic calculator, then pressure-test scores |
+| [`rice-prioritization`](skills/strategy/rice-prioritization) | Rank candidates with a deterministic RICE calculator, then pressure-test the scores |
 | [`ceo-review`](skills/strategy/ceo-review) | Review a drafted plan from one committed stance on eight business dimensions |
 | [`campaign-brief`](skills/strategy/campaign-brief) | Challenge a campaign brief on six dimensions before launch, then call go or no-go |
 | [`brand-review`](skills/strategy/brand-review) | Score finished marketing creative against the brand and list fixes by priority |
@@ -266,7 +267,7 @@ when a task matches.
 ### Visual
 
 | Skill | Use it to |
-|---|---|
+|:---|:---|
 | [`get-brand-kit`](skills/visual/get-brand-kit) | Look up colours, type, logos and voice in your brand kit (ships a placeholder) |
 | [`design-expert`](skills/visual/design-expert) | Audit, redesign and polish a product interface on your brand kit and design system |
 | [`create-html-slides`](skills/visual/create-html-slides) | Build a branded 16:9 slide deck as one self-contained HTML file, with optional PDF |
@@ -276,11 +277,11 @@ when a task matches.
 ### Harness
 
 | Skill | Use it to |
-|---|---|
+|:---|:---|
 | [`skill-builder`](skills/harness/skill-builder) | Author, refactor, split or port a skill so it is portable and fires when it should |
-| [`writing-for-agents`](skills/harness/writing-for-agents) | Word skill descriptions and instructions files so agents reach the right context |
+| [`writing-for-agents`](skills/harness/writing-for-agents) | Word skill descriptions and instructions so agents find the right context |
 | [`harness-eval`](skills/harness/harness-eval) | Measure whether skills fire when they should, with routing evals and static checks |
-| [`session-retro`](skills/harness/session-retro) | Read an agent session back and propose fixes by severity, each for the layer that owns it |
+| [`session-retro`](skills/harness/session-retro) | Read an agent session back and propose fixes by severity, each where it belongs |
 | [`add-standard`](skills/harness/add-standard) | Turn "we should always X" into one written, routed convention |
 | [`standards`](skills/harness/standards) | Route, change or retire a written convention and keep every pointer to it in step |
 | [`wizard`](skills/harness/wizard) | Generate an interactive shell wizard for the steps only a human can do |
@@ -295,7 +296,7 @@ when a task matches.
 > `npx skills add spencermarx/skills#stable --skill <name>`.
 
 | Skill | Use it to |
-|---|---|
+|:---|:---|
 | [`whiteboard`](skills/_incubating/whiteboard) | Draw on a live tldraw board with your agents, in your browser |
 
 `whiteboard` needs Node.js 22.12 or newer. On first use it installs tldraw, Vite
@@ -313,7 +314,7 @@ which setup writes.
 ```text
  EACH HARNESS              EACH REPOSITORY
  install once              run once
- plugin or npx skills ──▶  setup-aclarify-skills
+ plugin or npx skills ───▶ setup-aclarify-skills
                                │ writes
                                ▼
                            AGENTS.md
@@ -357,7 +358,7 @@ Several skills adapt open-source work. Each says so in its frontmatter, and
 [NOTICE](NOTICE) carries the licences.
 
 - [Matt Pocock's skills](https://github.com/mattpocock/skills) (MIT): the
-  starting point for 19 skills, among them `grill-me`, `tdd`, `triage` and
+  starting point for many skills, among them `grill-me`, `tdd`, `triage` and
   `wayfinder`.
 - [linkedin-skills](https://github.com/sergebulaev/linkedin-skills) by Sergey
   Bulaev (MIT): the AI-tell catalogs in `humanize`.
