@@ -9,24 +9,29 @@
 #   whiteboard.sh locate  (--board FILE | --name NAME) [--repo DIR] [--scratch DIR]
 #                                                        print the board's identity and live lock
 #   whiteboard.sh start   (--board FILE | --name NAME) [--detach] [--repo DIR] [--scratch DIR]
-#                                                        run the board's server (--detach: in the
-#                                                        background; wait until it is live)
+#                                                        run the board's server (--detach: in a
+#                                                        session of its own; wait until it is live)
 #
-# Boards: the boards folder is <repo>/<scratch>/whiteboard/. A board is its .tldr file, anywhere
-# in the repository; its room id derives from the file's canonical path, and its lock, chat log,
-# render and server log always live in the boards folder, named by that room id. `--name NAME`
-# names the board <boards folder>/<slug of NAME>.tldr, by the same slug rule the panel's "new
-# board" uses. `locate` prints {board, name, room, lock, messages, png, log, live} as JSON, where
-# `live` is the lock of a running server that holds the board, else null.
+# Boards: the boards folder is <repo>/<scratch>/whiteboard/. A board is its .tldr file, inside the
+# repository or the boards folder; its room id is the file's name without `.tldr`, and its lock,
+# port record, chat log, recipients, render and server log live in the boards folder, named by that
+# room id. `--name NAME` names the board <boards folder>/<slug of NAME>.tldr, by the same slug rule
+# the panel's "new board" uses. `locate` prints {board, name, room, lock, port, messages, recipients,
+# png, log, live} as JSON, where `live` is the lock of a running server that holds the board, else
+# null (server/boards.mjs).
 #
 # `start` refuses a board outside the repository and the boards folder, or in a folder that does not
-# exist, before it creates anything, then creates the boards folder and appends all further output
-# to the board's log. It refuses a board a live server already holds; attach to that server
-# instead. `start --detach` starts the server in a new session of its own (through Node, which
-# calls setsid), so no signal to the caller's process group or terminal reaches it; it waits until
-# the board is live and prints the board's `locate` JSON. When another server took the board first,
-# it waits for that one and prints its JSON (the caller is then a guest). On a failure it prints the
-# end of the board's log.
+# exist, and a board a live server already holds, before it creates anything. It then creates the
+# boards folder and replaces itself with the server (`exec node --import tsx index.ts`): run it as
+# `exec bash <this script> start ...` in the foreground of a background job, and the job's process is
+# the server's direct parent; the server saves and exits when that parent ends. Its output is the
+# job's output, and its exit code is the server's.
+#
+# `start --detach` is for a harness that cannot keep a background job: it starts the server in a new
+# session of its own (through Node, which calls setsid) with its owner watch off, so it runs until the
+# board is closed (POST /done), appending its output to the board's log. It waits until the board is
+# live and prints the board's `locate` JSON. When another server took the board first, it prints that
+# server's JSON (the caller is then a guest). On a failure it prints the end of the board's log.
 #
 # Runtime location, in order of preference:
 #   1. this skill's own folder (app/ and server/), when it is writable;
@@ -37,15 +42,16 @@
 # install; `install` then redoes only the steps that are stale.
 #
 # Exit codes:
-#   0  installed (status, path); installed (install); located (locate, live or not); the board is
-#      live (start --detach, its locate JSON on stdout); the server exited cleanly (start)
+#   0  installed (status, path, install); located (locate, live or not); the board is live
+#      (start --detach, its locate JSON on stdout); the server exited cleanly (start)
 #   1  a precondition failed (Node.js or npm missing or too old), the server could not load the
 #      board, or a detached server did not come up (the end of its log is on stderr); after a
 #      timeout it may still come up, so run `locate` again before starting another
 #   2  a bad argument, or a board that is not a .tldr file inside the repository or the boards
 #      folder, or whose folder does not exist (refused before anything is created)
-#   3  not installed (status prints what install would run; start refuses)
-#   4  the board is already live (start); attach to the server its JSON names
+#   3  another live server holds the board (start); attach to the server its JSON or log line names
+#   4  a whiteboard server too old to record its owner is running (start); see its log line
+#   5  not installed (status prints what install would run; start refuses)
 #
 # Never prompts. The skill asks the person before calling `install`: it downloads the npm
 # packages and Playwright's Chromium (about 150 MB).
@@ -118,7 +124,7 @@ need_node() {
   command -v node >/dev/null 2>&1 || { echo "whiteboard.sh: node is required. Install Node.js (>= $MIN_NODE), then retry." >&2; exit 1; }
 }
 
-# The board's identity as JSON (boards.mjs). Exit 0, 4 when a live server holds it, or 2 when it
+# The board's identity as JSON (boards.mjs). Exit 0, 3 when a live server holds it, or 2 when it
 # is not a board inside the repository or the boards folder, or its folder does not exist. Creates
 # nothing.
 locate_board() {
@@ -133,24 +139,19 @@ json_field() { # json_field <json> <field>
   node -e 'process.stdout.write(String(JSON.parse(process.argv[1])[process.argv[2]] ?? ""))' "$1" "$2"
 }
 
-# Succeeds when the lock file names a server that is still starting: its pid is alive and it has
-# not listened yet (port 0).
-lock_starting() { # lock_starting <lock file>
+# Start a command in a new session of its own, its output appended to <log>, and print its pid.
+# Node's detached spawn calls setsid(), so no signal to the caller's process group (a harness
+# reaping its tool call) and no hangup of the caller's terminal reaches it; `setsid(1)` is not on
+# macOS, and Node is already required. The owner watch is off: the server's parent is not the
+# caller's session, so the server runs until the board is closed.
+spawn_detached() { # spawn_detached <log> <command> [args...]
   node -e '
-    let lock;
-    try { lock = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); } catch { process.exit(1); }
-    if (!lock || lock.port !== 0 || typeof lock.pid !== "number") process.exit(1);
-    try { process.kill(lock.pid, 0); } catch (e) { process.exit(e.code === "EPERM" ? 0 : 1); }' "$1"
-}
-
-# Start a command in a new session of its own and print its pid. Node's detached spawn calls
-# setsid(), so no signal to the caller's process group (a harness reaping its tool call) and no
-# hangup of the caller's terminal reaches it; `setsid(1)` is not on macOS, and Node is already
-# required. Every stream is away from the caller's, so the caller's own command returns.
-spawn_detached() { # spawn_detached <command> [args...]
-  node -e '
-    const c = require("child_process").spawn(process.argv[1], process.argv.slice(2), { detached: true, stdio: "ignore" });
-    c.on("error", (e) => { console.error(`whiteboard.sh: could not start ${process.argv[1]}: ${e.message}`); process.exit(1); });
+    const fs = require("fs");
+    const out = fs.openSync(process.argv[1], "a");
+    const c = require("child_process").spawn(process.argv[2], process.argv.slice(3), {
+      detached: true, stdio: ["ignore", out, out], env: { ...process.env, WHITEBOARD_OWNER_WATCH: "off" },
+    });
+    c.on("error", (e) => { console.error(`whiteboard.sh: could not start ${process.argv[2]}: ${e.message}`); process.exit(1); });
     if (c.pid) { process.stdout.write(String(c.pid)); c.unref(); }' "$@"
 }
 
@@ -166,7 +167,7 @@ deps_in() { # a part's node_modules was installed from the skill's current lockf
 installed_in() {
   local dir="$1" part
   for part in app server; do deps_in "$dir/$part" || return 1; done
-  [ -x "$dir/server/node_modules/.bin/tsx" ] || return 1
+  [ -f "$dir/server/node_modules/tsx/package.json" ] || return 1
   [ -f "$dir/app/dist/index.html" ] || return 1
   [ "$(cat "$dir/app/dist/.sources-hash" 2>/dev/null)" = "$(sources_hash "$SKILL_DIR")" ] || return 1
   chromium_in "$dir"
@@ -243,12 +244,12 @@ case "$cmd" in
     fi
     echo "install would run:"
     install_commands "$target"
-    exit 3
+    exit 5
     ;;
   path)
     current_install || {
       echo "$NOT_INSTALLED" >&2
-      exit 3
+      exit 5
     }
     ;;
   install)
@@ -261,7 +262,7 @@ case "$cmd" in
     if [ "$target" = "$FALLBACK_DIR" ]; then
       echo "this skill's folder is read-only; installing into $FALLBACK_DIR instead."
       mkdir -p "$FALLBACK_DIR"
-      rm -rf "$FALLBACK_DIR/app/src" "$FALLBACK_DIR/server"/*.ts
+      rm -rf "$FALLBACK_DIR/app/src" "$FALLBACK_DIR/server"/*.ts "$FALLBACK_DIR/server"/*.mjs
       (cd "$SKILL_DIR" && find app server -type f -not -path '*/node_modules/*' -not -path 'app/dist/*' -print0 \
         | while IFS= read -r -d '' f; do mkdir -p "$FALLBACK_DIR/$(dirname "$f")"; cp "$f" "$FALLBACK_DIR/$f"; done)
       printf '*\n' > "$FALLBACK_DIR/.gitignore"
@@ -285,51 +286,56 @@ case "$cmd" in
   locate)
     need_board
     need_node
-    locate_board || { rc=$?; [ "$rc" -eq 4 ] || exit "$rc"; }
+    locate_board || { rc=$?; [ "$rc" -eq 3 ] || exit "$rc"; }
     ;;
   start)
     need_board
     need_node
     # 1. Refuse a board outside the repository or in a folder that does not exist (exit 2), or one
-    #    already live (exit 4), creating nothing. Every exit 2 is decided here.
+    #    already live (exit 3), creating nothing. Every exit 2 is decided here.
     where="$(locate_board)" && rc=0 || rc=$?
-    if [ "$rc" -eq 4 ]; then
+    if [ "$rc" -eq 3 ]; then
       echo "whiteboard.sh: this board is already live; attach to it instead of starting another server:" >&2
       echo "$where" >&2
-      exit 4
+      exit 3
     fi
     [ "$rc" -eq 0 ] || exit "$rc"
     board="$(json_field "$where" board)"
     log="$(json_field "$where" log)"
-    # 2. Create the boards folder, so the board's log has somewhere to go.
+    # 2. Create the boards folder, so the board's files, and a detached server's log, have somewhere
+    #    to go.
     mkdir -p "$BOARDS_DIR"
     if [ "$detach" -eq 1 ]; then
+      echo "--- whiteboard.sh start --detach, $(date -u +%Y-%m-%dT%H:%M:%SZ): $board" >>"$log"
       # 3. The runtime check, said in the log and to the caller.
-      current_install >/dev/null || { echo "$NOT_INSTALLED" | tee -a "$log" >&2; exit 3; }
+      current_install >/dev/null || { echo "$NOT_INSTALLED" | tee -a "$log" >&2; exit 5; }
       # 4. The server, in a new session of its own, so it outlives the caller and whatever reaps the
-      #    caller's process group. It appends to the board's log itself.
-      child="$(spawn_detached bash "$SCRIPT_DIR/whiteboard.sh" start --board "$board" --repo "$repo" --scratch "$scratch")" \
+      #    caller's process group. A wrapping shell records the server's exit code, since the server
+      #    is not this shell's child once the spawner returns; it writes it only while this start
+      #    still waits (the .wait marker), so a server closed later leaves nothing behind.
+      rcfile="$log.exit.$$"
+      rm -f "$rcfile"
+      : > "$rcfile.wait"
+      trap 'rm -f "$rcfile" "$rcfile.wait"' EXIT
+      child="$(spawn_detached "$log" bash -c 'bash "$1" start --board "$2" --repo "$3" --scratch "$4"; rc=$?; [ ! -e "$5.wait" ] || echo "$rc" > "$5"' \
+        _ "$SCRIPT_DIR/whiteboard.sh" "$board" "$repo" "$scratch" "$rcfile")" \
         && [ -n "$child" ] || exit 1
-      lock="$(json_field "$where" lock)"
-      # 5. Wait until the board is live, then print its locate JSON. The server is not this shell's
-      #    child, so its exit code cannot be read; every exit 2 and 3 was decided above. A server
-      #    that ends before the board is live either lost the race to another server, which then
-      #    holds the lock while it starts (wait for it, and print its JSON), or failed. The lock is
-      #    read before `locate`, so a rival that goes live in between is still seen live.
+      # 5. Wait until the board is live, then print its locate JSON. A server that loses a race to
+      #    another exits 3 once the other holds the lock, so the board then reads live and the other's
+      #    JSON is printed: the caller is a guest.
       deadline=$((SECONDS + DETACH_WAIT_S))
       while [ "$SECONDS" -lt "$deadline" ]; do
-        gone=0; starting=0
-        if ! kill -0 "$child" 2>/dev/null; then
-          gone=1
-          lock_starting "$lock" && starting=1
-        fi
+        gone=0
+        kill -0 "$child" 2>/dev/null || gone=1
         where="$(locate_board)" && rc=0 || rc=$?
-        if [ "$rc" -eq 4 ]; then echo "$where"; exit 0; fi
+        if [ "$rc" -eq 3 ]; then echo "$where"; exit 0; fi
         [ "$rc" -eq 0 ] || exit "$rc"
-        if [ "$gone" -eq 1 ] && [ "$starting" -eq 0 ]; then
+        if [ "$gone" -eq 1 ]; then
+          code="$(cat "$rcfile" 2>/dev/null || echo 1)"
+          case "$code" in 3 | 4) ;; *) code=1 ;; esac
           echo "whiteboard.sh: the server exited before the board was live. The end of $log:" >&2
           tail -n 20 "$log" >&2 || true
-          exit 1
+          exit "$code"
         fi
         sleep 0.5
       done
@@ -338,17 +344,15 @@ case "$cmd" in
       tail -n 20 "$log" >&2 || true
       exit 1
     fi
-    # 3. From here every line goes to the board's log; a refusal is also said to the caller.
-    exec 3>&2
-    exec >>"$log" 2>&1
-    echo "--- whiteboard.sh start, $(date -u +%Y-%m-%dT%H:%M:%SZ): $board"
-    dir="$(current_install)" || { echo "$NOT_INSTALLED"; echo "$NOT_INSTALLED" >&3; exit 3; }
-    exec 3>&-
+    # 3. The runtime check.
+    dir="$(current_install)" || { echo "$NOT_INSTALLED" >&2; exit 5; }
+    # 4. Become the server. `exec` keeps this process's pid, so the caller's process stays the
+    #    server's parent, which the server watches (unless WHITEBOARD_OWNER_WATCH=off). The server
+    #    claims the board's lock itself before it listens, so of two starts racing on one board exactly
+    #    one serves it; the other exits 3.
     cd "$dir/server"
-    # The server claims the board's lock exclusively before it listens, so of two starts racing
-    # on one board exactly one serves it; the other exits 4.
-    PORT="${PORT:-0}" WHITEBOARD_REPO="$repo" WHITEBOARD_HOME="$BOARDS_DIR" WHITEBOARD_BOARD="$board" \
-      exec "$dir/server/node_modules/.bin/tsx" index.ts
+    WHITEBOARD_REPO="$repo" WHITEBOARD_HOME="$BOARDS_DIR" WHITEBOARD_BOARD="$board" \
+      exec node --import tsx index.ts
     ;;
   *)
     usage

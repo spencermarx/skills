@@ -3,11 +3,8 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "bin": {
-    "whiteboard-bridge": "index.ts"
-  },
   "scripts": {
-    "start": "tsx index.ts",
+    "start": "echo 'start the board with scripts/whiteboard.sh start, not npm' >&2; exit 1",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

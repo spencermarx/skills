@@ -548,6 +548,14 @@
 .wb-avatar.is-selected {
   background: var(--wb-surface-hover);
 }
+/* [v9.11 #64, SPEC #33] A guest: present on the board, never addressable, so no pointer or hover. */
+.wb-avatar.is-guest {
+  cursor: default;
+  opacity: 0.7;
+}
+.wb-avatar.is-guest:hover {
+  background: transparent;
+}
 .wb-av-name {
   font-size: var(--wb-fs-sm);
   font-weight: 550;
@@ -737,6 +745,12 @@
   background: color-mix(in srgb, var(--wb-muted) 16%, transparent);
   color: var(--wb-muted);
 }
+/* [v9.11 #64] A Send queued behind a POST that has not failed: neutral, quieter than "queued",
+   because nothing is wrong and the server has not stored it yet. */
+.wb-life-waiting {
+  background: color-mix(in srgb, var(--wb-muted) 8%, transparent);
+  color: var(--wb-muted);
+}
 .wb-life-working {
   background: color-mix(in srgb, var(--wb-accent) 14%, transparent);
   color: var(--wb-accent);
@@ -744,6 +758,11 @@
 .wb-life-stalled {
   background: color-mix(in srgb, var(--wb-warn) 18%, transparent);
   color: var(--wb-warn);
+}
+/* [v9.11 #64] A Send the server refused (a 4xx): it will not be retried. */
+.wb-life-failed {
+  background: color-mix(in srgb, var(--wb-danger) 14%, transparent);
+  color: var(--wb-danger);
 }
 .wb-life-done {
   background: color-mix(in srgb, var(--wb-success) 16%, transparent);
@@ -778,6 +797,21 @@
 }
 .wb-notice-text {
   min-width: 0;
+}
+/* Dismiss control on a transient notice (the refused board switch). */
+.wb-notice-dismiss {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  font: inherit;
+  line-height: 1.5;
+  color: var(--wb-muted);
+  cursor: pointer;
+}
+.wb-notice-dismiss:hover {
+  color: var(--wb-text);
 }
 .wb-notice code {
   font-size: var(--wb-fs-xs);

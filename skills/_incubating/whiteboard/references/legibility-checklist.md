@@ -1,8 +1,17 @@
 # Legibility checklist + the blind critic
 
-The bar a drawn board must clear **before** the lead points back (the loop's step (e)).
-Legibility is a **gate**, not polish: keep correcting until every item passes.
-Aesthetics (below) are *not* gated — do not loop on them.
+Read after every drawing, before you point back (SKILL.md §2(e)): this is the bar
+a drawn board must clear. Legibility is a **gate**, not polish: keep correcting
+until every item passes. Aesthetics (below) are *not* gated — do not loop on them.
+
+## The gate, step by step
+
+1. `GET /image`, then run the blind critic (below) with only the PNG path
+   and the "Must pass" items, never the instruction or the `/exec` code. It
+   returns pass or fail per item, locating each fail.
+2. On a fail, correct with `/exec` and re-run the critic, at most 3 rounds. If it
+   still fails, `/agent-message` that the board may be hard to read, and where.
+3. Once legibility passes, take at most one aesthetic pass, then stop.
 
 ## Must pass (legibility)
 

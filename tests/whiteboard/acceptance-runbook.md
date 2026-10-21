@@ -1,134 +1,154 @@
-# Whiteboard v9.1 — manual acceptance runbook
+# Whiteboard — manual acceptance runbook
 
-The operator-in-the-loop half of the v9.1 done-bar. The headless suite
-(`server/acceptance-v9.1.test.mjs` for the two new server seams;
-`server/integration.test.mjs` for the carried §8.5 durable-delivery floor) proves
-everything a process can prove without a human and a live poller. What is left needs
-the operator at the browser, a lead session running the skill-owned background poller, and
-a real Claude Code turn cycle: the wake-on-exit, the listen-while-interact property,
-the stay-connected invariant, forced-end survival, the operator teardown affordance,
-and per-object authorship on the live canvas.
+The operator-in-the-loop half of the done-bar. The headless suite proves everything a
+process can prove without a human and a live session. The suites are in `tests/whiteboard/`:
+`doorbell.test.ts` (the pull, the receipt, the doorbell against a fake inbox,
+the canary, the owner watch, same-port restart, the one-server lock claim and its wait on a
+board being released or held by an owner that is not answering, the transactional board
+switch, the Origin/Host guard),
+`acceptance-v9.1.test.ts` (the recipient guard and the teardown seam),
+`integration.test.ts` (the durable floor, workers, revival),
+`busy-loop.test.ts` (a dead log pipe, a frozen canvas, the owner dying) and
+`render-cap.test.ts` (the `?bounds=` forwarding and the no-frame timeout against a fake
+canvas, and, in a real Chromium, the render-canvas relaunch after a renderer crash, a failed
+navigation, a switch during the relaunch, a renderer that stops answering, a switch during
+the boot launch and a switch to an empty board, a give-up that a later launch withdraws, perception during a frozen navigation and during a relaunch, and what a failed `/exec` leaves;
+the app-side raster cap is not covered). What is
+left needs an operator at the browser, a lead session running the skill, and a real turn
+cycle: a ring arriving in the session, the model fetching it, mid-draw pickup, the
+board's lifetime, the teardown affordance, and per-object authorship on the live canvas.
 
-Run this after all four v9.1 lanes are integrated and the app is rebuilt
-(`npm --prefix .claude/skills/whiteboard/app run build`). Times are Donostia local.
-`<port>` is the board's port and `<room>` its room id, both from
-`whiteboard.sh locate --board <file>`; `<board>` is its name.
+Sections 0 to 5 are the Claude Code path (the doorbell, the canary, the owned boot); section 6
+is the pull path every other harness takes. Run it on the branch, from the repository root, after
+installing the runtime, which also builds the app:
+`bash skills/_incubating/whiteboard/scripts/whiteboard.sh install --repo . --scratch .scratchpad`.
+`<port>` is the port the server prints on boot; `<board>` is its name; the board's files are in
+the boards folder, `.scratchpad/whiteboard/`.
 
-## 0. Clean start
+## 0. Clean start and the canary
 
-1. Boot one board on the branch via the skill (SPEC §9). The boot launches the
-   render-canvas, opens the operator browser, registers the lead, drains any backlog,
-   and starts the background poller.
-2. Sanity: `GET /canvas-status` returns `activeRoom:"<room>"`, `agents:[{id:"lead",…}]`,
-   and `agentParked:true`. The `agentParked:true` with an empty terminal is the whole
-   point of v9.1: a waiter is parked in the background job while the foreground turn has
-   already ended.
+1. Run `/whiteboard new <board>`. The skill boots the server with
+   `exec bash <skill dir>/scripts/whiteboard.sh start --name <board> --repo . --scratch .scratchpad`
+   as the foreground of a `run_in_background` job, opens the browser, registers the lead and
+   rings the canary.
+2. **Expect:** the session reports that the canary ring arrived and was fetched back
+   before it calls the board ready. `GET /canvas-status` shows
+   `doorbell.inbox:true` and `doorbell.canary:"fetched"`.
+3. Confirm the parent: `ps -o ppid= -p <lock.pid>` is the Claude process
+   (`ps -o comm= -p <that ppid>` reads `claude`), with nothing in between: `whiteboard.sh`
+   execs node, so neither bash nor npm stays between them. `/canvas-status` shows
+   `ownerIsClaude:true` and `doorbell.mode:"inbox"`.
 
-## 1. Poll-loop spike (prove the loop before trusting anything above it)
+## 1. The dry run (decision #64)
 
-This is the load-bearing mechanism. SPEC §12 lane 4 says prove it first.
+Each Send goes from the browser's Send box.
 
-1. With the lead idle (its foreground turn ended, no Send outstanding), watch the
-   background poller. Over a full `LONGPOLL_MS` window (240s, `index.ts:42`) with no
-   Send, the poller's `curl` returns `204` and the script **re-opens** the hanging GET.
-   **Expect:** the session is **not** woken across the `204` — no new foreground turn,
-   the terminal stays quiet, and `GET /canvas-status` still reads `agentParked:true`
-   throughout. A `204` is a re-arm, never a wake.
-2. Draw a shape, select it, type any instruction, Send. **Expect:** the poller's `curl`
-   returns `200` with the Send, the background job **exits**, and that exit **wakes the
-   session** (a harness re-invoke) into a fresh foreground turn that acts on the Send.
-   The operator did not re-launch anything.
-3. Immediately after the lead acknowledges (`POST /instruction-complete`) and while it is
-   mid-act on the next stroke, Send again. **Expect:** the second Send waits in the durable
-   per-recipient queue and **drains the instant the poller relaunches** (the unmissable
-   final step of the turn). Nothing is lost; the operator never re-launches.
+1. **A draw Send** ("draw three boxes in a row"). **Expect:** a ring arrives in the
+   session, the session fetches `/pending`, draws, points back, and completes it. The
+   panel badge goes rung → working → done.
+2. **An "edit SKILL.md" Send** ("update SKILL.md §5 to say X"). **Expect:** the session
+   fetches it and treats it as the operator's request, not as a peer asking it to edit
+   config. The ring itself carried no Send text.
+3. **A "commit" Send** ("commit that change"). **Expect:** the same: fetched and acted on
+   within the session's own permissions.
+4. **A mid-draw stop.** Send a long drawing task, and while it is drawing Send "stop".
+   **Expect:** the next bridge response carries `pending:["<id>"]`, the session fetches
+   before its next draw call, and it stops.
+5. **A close.** Press the drawer's confirm-gated **close-session** control. **Expect:**
+   the session is rung for a teardown item, posts a closing note, runs the pre-teardown
+   gate and performs `POST /done`; `<board>.lock` and `<board>.port` are removed and the
+   background job ends.
 
-## 2. Listen-while-interact (#48)
+## 2. Not heard is loud
 
-1. Send an instruction ambiguous enough that the lead asks a clarifying question. The lead
-   posts the question and **hands the foreground turn back** to the terminal.
-2. While that question sits unanswered in the terminal (operator and lead mid-conversation),
-   Send a *second* instruction from the browser. **Expect:** it lands **instantly** — a
-   background waiter was parked the whole time — and the lead acts on it. The operator did
-   not have to answer the first question or re-launch to get the second Send delivered.
-3. Confirm `GET /canvas-status` read `agentParked:true` continuously across the whole
-   exchange, including while the terminal was waiting on the human.
+1. With the board up, Send while the session is busy on a long unrelated task, and do
+   not let it fetch. **Expect:** the badge reads **rung**, then after the re-rings run
+   out (about 12 minutes) **not heard**, with the notice "The agent has not heard your
+   message". When the session finally fetches, the badge moves to working.
 
-## 3. No premature hangup (#49)
+## 3. The board's lifetime
 
-1. Steer the lead to a point where the work looks finished.
-2. **Expect:** the lead **asks** ("are we done — can I disconnect?") and **keeps listening**.
-   It does **not** call `/done` on its own, and `agentParked` stays `true`.
-3. Say nothing for a while. **Expect:** operator silence keeps the line open — the lead does
-   not interpret silence as permission to close. Only an explicit operator "yes" (or the
-   teardown affordance, §5) closes the session.
+1. End the session (`/exit`). **Expect:** within a few seconds the server saves the
+   board, removes `<board>.lock` and exits, and `<board>.port` is still there with the
+   port it served on. The tab shows that the board is closing.
+2. With the board down, Send "add a box" and then "delete that box" from the still-open
+   tab. **Expect:** both lines read "not sent: sends when the board is back".
+3. Resume the session and run `/whiteboard open <board>`. **Expect:** it boots on the
+   port `<board>.port` recorded (the listening line ends `(recorded port)`), and the
+   still-open tab **reconnects without a reload** and sends the held lines one at a time,
+   in the order typed, each reading "sending" while in flight. The session opens no second
+   tab, because `humans` on `/canvas-status` already counts this one. The lead is rung, fetches
+   both oldest first, and neither is duplicated in the log. Any Send that was fetched but
+   not completed is rung again.
+4. Stop the board's background job from `/tasks`. **Expect:** the board goes down the
+   same way, content intact and `<board>.port` kept.
+5. Autocompact the session mid-board. **Expect:** the board stays up (same process).
 
-## 4. Forced-end board survival (#50)
+## 4. The canary fails loudly
 
-1. Drive the lead session until a **forced** end fires — autocompaction (~76–84%), context
-   exhaustion, or `maxTurns`. (To force it deliberately, run the session long/hot enough to
-   trip autocompaction.)
-2. **Expect:** the board's **Node process stays up** — its port still answers
-   `GET /canvas-status`, and `<room>.lock` is still in the boards folder pointing at the live pid. The
-   forced end tore down the *session*, not the *board*.
-3. Send an instruction while no lead session is attached. **Expect:** `agentParked:false`
-   (the session ended, not merely mid-conversation), the panel shows the Send **queued** with
-   a plain "no agent is listening" state, and the Send is **not** lost.
-4. Run `/whiteboard open <board>`. **Expect:** it **attaches** to the still-live process
-   (not a stale-lock reclaim, not a fresh boot), drains the queued Send oldest-first, and acts
-   on it. No teardown, no loss.
+1. Set `crossSessionInbound` to `hold` for a session, then `/whiteboard open <board>`.
+   **Expect:** the canary ring does not arrive, and the session says the board's doorbell
+   cannot reach it, names the likely causes, and does not report the board as listening.
 
-## 5. Operator teardown affordance closes the session (#53)
+## 5. Per-object authorship on the live canvas (§8.6)
 
-1. In the drawer, press the confirm-gated **close-session** control and confirm.
-2. **Expect (network):** the browser posts the distinct teardown-request (e.g.
-   `POST /request-teardown`), **not** `POST /message`. It does **not** appear in the chat log
-   — it is a control signal. `GET /canvas-status` briefly reads `teardownRequested:true`.
-3. **Expect (lead):** the lead's `supervise=1` poll returns the **teardown directive**; the
-   lead finishes any in-flight turn, posts a brief closing `/agent-message`, and performs the
-   graceful `POST /done`. This is the **only** agent-side teardown, and it fires **only** on
-   this explicit operator signal — never at the lead's discretion.
-4. **Expect (after):** the process exits, `<room>.lock` is removed, and the port stops
-   answering. Confirm the natural-language fallback too: on a fresh board, a plain
-   "you can disconnect now" Send drives the same graceful close.
-
-## 6. Per-object authorship on the live canvas (§8.6)
-
-Not headlessly testable — the app stamps `meta.createdBy` via an editor side-effect on the
-live render-canvas and the operator's browser, both skipped under `WHITEBOARD_NO_CANVAS`.
+The stamping itself is tested headlessly: `sync-corruption.test.ts` Board A boots the real
+render-canvas and opens a real operator tab, and proves who a duplicate, a paste and a restore
+belong to. What this section checks live is the lead's use of the stamps.
 
 1. The operator draws two shapes; the lead draws two shapes via `/exec`.
 2. The operator types "select everything you drew, not what I drew." **Expect:** the lead
    fetches `GET /shapes`, filters by `meta.createdBy.kind === 'agent'` (or its own
-   `sessionId`), selects exactly its own shapes, and names the count — answered from the data,
-   not guessed.
+   `sessionId`), selects exactly its own shapes, and names the count — answered from the
+   data, not guessed.
 3. Inspect a shape's `meta` in `/shapes`. **Expect:** `createdBy` carries the correct
    `{kind,name,sessionId?,color?,at}` and is immutable; a subsequent edit by the other peer
    updates `lastEditedBy` but leaves `createdBy` unchanged.
+4. The operator duplicates one of the lead's shapes (Cmd/Ctrl+D) and types "select everything
+   you drew". **Expect:** the lead's selection leaves out the copy, whose `createdBy` names the
+   operator.
+
+## 6. Pull mode: the detached boot (any harness without a session inbox)
+
+Run it from a plain terminal, or a harness other than Claude Code. Nothing in it uses an inbox.
+
+1. Boot detached, from a shell you will close afterwards:
+   `bash skills/_incubating/whiteboard/scripts/whiteboard.sh start --detach --name <board> --repo . --scratch .scratchpad`.
+   **Expect:** exit 0 and the board's JSON with `live` set; the lock has `detached:true` and a
+   `parentPid` equal to its own `pid`; the server's output goes to `<board>.log` in the boards folder.
+   `GET /canvas-status` shows `detached:true` and `doorbell.mode:"pull"`.
+2. Open the browser URL and register the lead (SKILL.md §1 step 6); keep the `sessionId` as `<sid>`.
+3. With nothing pending, run `curl -s 'http://127.0.0.1:<port>/pending?sessionId=<sid>&wait=5000'`.
+   **Expect:** about 5 s later, `{"items":[]}`.
+4. Run `curl -s 'http://127.0.0.1:<port>/pending?sessionId=<sid>&wait=110000'` in the foreground and,
+   while it waits, Send "draw a box" from the browser. **Expect:** the call returns at once with
+   the `send` item; the badge goes queued → working, and then done once you
+   `POST /instruction-complete {id, sessionId}`. It never reads **not heard** while a pull is
+   parked or one ran in the last five minutes.
+5. Send again and run no pull for longer than `WHITEBOARD_PULL_GRACE_MS` (5 minutes by default).
+   **Expect:** the badge reads **not heard**, and `doorbell.items` names the Send with reason
+   `not-listening`. The next pull returns it.
+6. Close the shell that ran step 1. **Expect:** `kill -0 <lock.pid>` still succeeds and the board
+   keeps serving: with the owner watch off, the server does not end with its spawner.
+7. Close: `curl -s -X POST http://127.0.0.1:<port>/done -H 'content-type: application/json' -d '{}'`.
+   **Expect:** the board is saved, the server exits, and `<board>.lock` and `<board>.port` are removed.
+   The same call without the JSON content-type answers `415` and closes nothing.
 
 ## Pass criteria (all must hold)
 
-- [ ] The poller holds a waiter across a `204` without waking the session, and wakes it on a
-      real Send; a mid-act Send drains on the next relaunch.
-- [ ] A Send lands instantly while operator and lead are mid-conversation in the terminal;
-      `agentParked` stays `true` throughout.
-- [ ] The lead asks before disconnecting and never `/done`s on its own; operator silence keeps
-      the line open.
-- [ ] A forced session end leaves the board process, port, and lock up; the next `/whiteboard
-      open` attaches and drains the waiting Send.
-- [ ] The drawer's confirm-gated control posts a teardown-request (not a chat message), the
-      supervise poll surfaces the teardown directive, and the lead performs the only agent-side
-      `/done`; the natural-language fallback closes the same way.
-- [ ] Shapes carry correct, immutable `createdBy`; the lead selects its own contributions from
-      `meta` alone.
-
-## Notes
-
-- `LONGPOLL_MS` is hard-coded at 240s (`index.ts:42`); a `204` timeout is a re-arm, not a
-  failure. The poller's `curl --max-time` is set just over it (~250s).
-- The re-arm rests on three stacked guarantees, not agent memory (SPEC §8.5): the unmissable
-  final-step relaunch after `/instruction-complete`, the boot/attach poller-liveness check
-  (`/canvas-status agentParked`), and the durable-queue floor. If step 1.3 or 4 ever loses a
-  Send, one of the three has a hole — that is the thing to chase.
-- A `Stop` hook cannot own the listener: a hook-spawned process does not get the
-  `run_in_background` wake-on-exit, so the listener must be the agent's own background job.
+- [ ] The canary is rung and fetched back before the board is called ready, and the
+      server's parent is the Claude process.
+- [ ] The draw, "edit SKILL.md" and "commit" Sends are each fetched and acted on.
+- [ ] A mid-draw "stop" is picked up from the `pending` field before the next draw call.
+- [ ] The close control drives the only agent-side `/done`.
+- [ ] An unfetched Send ends in "not heard", visibly.
+- [ ] Ending the session takes the board down with its content saved, the lock removed
+      and the port sidecar kept; reopening binds the same port, the tab reconnects without
+      a reload with no second tab opened, and Sends typed while the board was down are each
+      sent once, in the order typed, on reconnect.
+- [ ] With `crossSessionInbound: hold`, the canary fails loudly.
+- [ ] Shapes carry correct, immutable `createdBy`; the lead selects its own contributions
+      from `meta` alone.
+- [ ] Pull mode: a detached board reports `doorbell.mode:"pull"`, a parked `/pending?wait` returns
+      a Send at once, the badge never reads "not heard" while the lead pulls, the server outlives
+      its spawning shell, and `/done` stops it.

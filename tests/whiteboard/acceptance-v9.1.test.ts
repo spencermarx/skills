@@ -7,101 +7,117 @@
 //      rather than silently defaulted to the lead; an OMITTED recipient still defaults to the
 //      lead (200); {kind:lead} / {kind:broadcast} / a registered worker are accepted (200).
 //   2. Teardown seam (#53) — POST /request-teardown surfaces a teardown directive on the lead's
-//      supervise=1 poll (a control signal, NOT a chat Message), clears on consume, and the
+//      GET /pending pull (a control signal, NOT a chat Message), clears on consume, and the
 //      graceful POST /done returns ok.
 //
-// The carried §8.5 durable-delivery / agentParked / lease checks are NOT duplicated here — they
-// already pass in server/integration.test.mjs (boards C durable-queue + re-drain, D agentParked
+// The carried §8.5 durable-delivery / lead-status / lease checks are NOT duplicated here — they
+// already pass in integration.test.ts (boards C durable-queue + re-drain, D lead status
 // flip, E lease/visibility-timeout, F–J per-recipient routing/broadcast, K typed-AgentId 400,
 // L verbatim nudge). This file adds only what v9.1 introduces, plus one durable-floor assertion
 // specific to v9.1: that a teardown REQUEST does not enter the queue or displace pending work.
 // The meta.createdBy authorship check (§8.6) needs the live render-canvas (the app stamps it via
 // an editor side-effect), so it is not headlessly testable with WHITEBOARD_NO_CANVAS and lives in
-// the manual runbook references/acceptance-v9.1.md instead.
+// the manual runbook tests/whiteboard/acceptance-runbook.md instead.
 //
-//   node tests/whiteboard/acceptance-v9.1.test.mjs
+//   node --import tsx tests/whiteboard/acceptance-v9.1.test.ts      (run from the skill's server/)
 //
-// Same harness as integration.test.mjs: boots the real bridge over tsx with the render-canvas
+// Same harness as integration.test.ts: boots the real bridge over tsx with the render-canvas
 // skipped (WHITEBOARD_NO_CANVAS), ephemeral ports, in this suite's own throwaway repository. No
 // Chromium, no browser, no running board touched, no external network. Exit 0 = pass.
 
+import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import fs from 'node:fs';
-import { sandbox, startServer, stopServer, stopAllServers } from './harness.mjs';
+import path from 'node:path';
+import type { Readable } from 'node:stream';
+import { CANVAS_KEY, SERVER_DIR, sandbox } from './harness.mjs';
 
+// This suite lives outside the skill, in tests/whiteboard/: the server comes from the skill's
+// server/, and every board from this suite's own throwaway repository.
+// No suite server may ring a real session's inbox, take its identity, or read an exported PORT.
+const SCRUBBED_ENV = { CLAUDE_CODE_MESSAGING_SOCKET: undefined, CLAUDE_CODE_MESSAGING_TOKEN: undefined,
+  CLAUDE_CODE_SESSION_ID: undefined, CLAUDE_PID: undefined, CLAUDE_JOB_DIR: undefined, PORT: undefined };
+// Boot the server the way the skill does (node with the tsx loader in-process, no tsx CLI
+// wrapper), so the spawned child IS the server and killing it never orphans a board.
+const BOOT_ARGS = ['--import', 'tsx', 'index.ts'];
+
+// This suite's own throwaway repository (WHITEBOARD_REPO); HOME is its boards folder.
 const SB = sandbox('acceptance');
+const HOME: string = SB.home;
 
-
-// Distinct board names (own prefix) so this file can run alongside integration.test.mjs without
+// Distinct board names (own prefix) so this file can run alongside integration.test.ts without
 // colliding on .tldr / .lock / .messages.jsonl files or room ids.
 const P = 'wbv91_p'; // [v9.1 #43] parseRecipient guard: malformed 400, omitted defaults to lead
-const T = 'wbv91_t'; // [v9.1 #53] teardown seam: request → supervise directive → clears → /done
+const T = 'wbv91_t'; // [v9.1 #53] teardown seam: request → /pending teardown item → clears → /done
 const boards = [P, T];
-const ROOM = Object.fromEntries(boards.map((b) => [b, SB.room(SB.board(b))]));
 
-// --- tiny assertion harness (mirrors integration.test.mjs) ------------------
+// --- tiny assertion harness (mirrors integration.test.ts) ------------------
 let passed = 0;
-const failures = [];
-function ok(cond, msg) {
+const failures: string[] = [];
+function ok(cond: unknown, msg: string): void {
   if (cond) { passed++; console.log(`  ✓ ${msg}`); }
   else { failures.push(msg); console.log(`  ✗ ${msg}`); }
 }
-function eq(actual, expected, msg) {
+function eq(actual: unknown, expected: unknown, msg: string): void {
   ok(actual === expected, `${msg} (got ${JSON.stringify(actual)}, want ${JSON.stringify(expected)})`);
 }
 
-// --- boot a bridge in this suite's own throwaway repository -----------------
-function boot(board, extraEnv = {}) {
-  const child = startServer(SB, SB.board(board), extraEnv);
-  child._board = board;
-  child.kill = (signal = 'SIGTERM') => { void stopServer(child, signal); return true; };
-  return child;
+// --- boot a bridge, resolve its port from stdout (identical to integration.test.ts) ----------
+type Server = ChildProcessByStdio<null, Readable, Readable> & { _board: string; _port: Promise<number> };
+function boot(board: string, extraEnv: Record<string, string> = {}): Server {
+  const boardPath = path.join(HOME, `${board}.tldr`);
+  const child = spawn(process.execPath, BOOT_ARGS, {
+    cwd: SERVER_DIR,
+    env: { ...process.env, ...SCRUBBED_ENV, ...SB.env, WHITEBOARD_CANVAS_KEY: CANVAS_KEY, WHITEBOARD_NO_CANVAS: '1', WHITEBOARD_BOARD: boardPath, ...extraEnv },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const port = new Promise<number>((resolve, reject) => {
+    let buf = '';
+    const onData = (d: Buffer): void => {
+      buf += d.toString();
+      const m = buf.match(/WHITEBOARD_PORT=(\d+)/);
+      if (m) { child.stdout.off('data', onData); resolve(Number(m[1])); }
+    };
+    child.stdout.on('data', onData);
+    child.stderr.on('data', (d: Buffer) => { if (/Error|error:/.test(d.toString())) buf += d.toString(); });
+    child.on('exit', (code) => reject(new Error(`server ${board} exited early (code ${code})\n${buf}`)));
+    setTimeout(() => reject(new Error(`server ${board} never printed a port\n${buf}`)), 20000);
+  });
+  return Object.assign(child, { _board: board, _port: port });
 }
 
-const j = (port, p, init) => fetch(`http://127.0.0.1:${port}${p}`, init).then((r) => r.json());
-const post = (port, p, body) =>
-  j(port, p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+// The response shapes this file reads. Each names only the fields a check looks at.
+interface OkReply { ok?: boolean }
+interface Registered { sessionId: string }
+interface StoredMessage { id: string; recipient?: { kind?: string; id?: string } | null }
+interface MessagesReply { messages: StoredMessage[] }
+interface PendingItem { kind?: string; id?: string; teardown?: boolean }
+interface PendingReply { items: PendingItem[] }
+interface CanvasStatus { teardownRequested?: boolean }
+
+const j = <T>(port: number, p: string, init?: RequestInit): Promise<T> => fetch(`http://127.0.0.1:${port}${p}`, init).then((r) => r.json() as Promise<T>);
+const post = <T = OkReply>(port: number, p: string, body: unknown): Promise<T> =>
+  j<T>(port, p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 // Raw variants that expose the HTTP status (the JSON helpers swallow it), so a seam-validation
 // rejection can be asserted as a 400 rather than inferred from the body.
-const postStatus = (port, p, body) =>
+const postStatus = (port: number, p: string, body: unknown): Promise<number> =>
   fetch(`http://127.0.0.1:${port}${p}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.status);
 
-// Poll /next-instruction with a client-side deadline (same null semantics as integration.test.mjs:
-// a pending Send returns fast; an empty queue long-polls, which we abort and read as "nothing", null).
-async function nextOrNull(port, ms = 2000) {
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), ms);
-  try {
-    const r = await fetch(`http://127.0.0.1:${port}/next-instruction?sessionId=lead`, { signal: ac.signal });
-    if (r.status === 204) return null;
-    return await r.json();
-  } catch { return null; }
-  finally { clearTimeout(timer); }
-}
-
-// The lead's supervisor long-poll (?supervise=1). Returns its own lead Send, a revive directive,
-// a [v9.1] teardown directive, or null (aborted long-poll / 204).
-async function superviseOrNull(port, sid, ms = 2500) {
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), ms);
-  try {
-    const r = await fetch(`http://127.0.0.1:${port}/next-instruction?supervise=1&sessionId=${sid}`, { signal: ac.signal });
-    if (r.status === 204) return null;
-    return await r.json();
-  } catch { return null; }
-  finally { clearTimeout(timer); }
+// [v9.11 #64] The lead's pull: GET /pending as the registered lead. Returns the items array.
+async function leadPull(port: number): Promise<PendingItem[]> {
+  const { sessionId } = await post<Registered>(port, '/session/register', { name: 'Claude', clientKey: 'lead' });
+  return (await j<PendingReply>(port, `/pending?sessionId=${sessionId}`)).items;
 }
 
 // [v9.1 #53] Recognize a teardown directive structurally. The FIXED CONTRACT is `kind:"teardown"`
 // (SPEC §2/§9); we also accept a `{ teardown:true }` flag shape so the assertion tracks the seam
 // intent regardless of the exact field name the server lane picks — the report flags this so the
 // integrator can pin it to the shape actually shipped.
-const isTeardown = (dir) => !!dir && (dir.kind === 'teardown' || dir.teardown === true);
+const isTeardown = (dir: PendingItem | undefined): boolean => !!dir && (dir.kind === 'teardown' || dir.teardown === true);
 
 function cleanupFiles() {
-  for (const b of boards) {
-    fs.rmSync(SB.board(b), { force: true });
-    for (const f of Object.values(SB.files(SB.board(b)))) fs.rmSync(f, { force: true });
+  for (const b of boards) for (const ext of ['tldr', 'messages.jsonl', 'recipients.json', 'lock', 'png', 'port']) {
+    fs.rmSync(path.join(HOME, `${b}.${ext}`), { force: true });
   }
 }
 
@@ -135,7 +151,7 @@ async function main() {
   // --- omitted → 200, defaults to the lead (recipient absent == the lead, §8.2) ---
   const pOmit = await post(portP, '/message', { text: 'to the lead by default', idempotencyKey: 'p-omit' });
   ok(pOmit.ok === true, 'POST /message with NO recipient is accepted (200)');
-  const pOmitMsg = (await j(portP, `/messages?room=${ROOM[P]}`)).messages.find((m) => m.id === 'p-omit');
+  const pOmitMsg = (await j<MessagesReply>(portP, `/messages?room=${P}`)).messages.find((m) => m.id === 'p-omit');
   ok(!!pOmitMsg, 'the omitted-recipient Send is stored');
   ok(pOmitMsg && (pOmitMsg.recipient == null || pOmitMsg.recipient.kind === 'lead'),
      'the omitted-recipient Send defaults to the lead (recipient absent or kind:lead)');
@@ -149,17 +165,17 @@ async function main() {
      'POST /message to a registered worker is accepted');
 
   // The rejected (malformed) Sends must never have been stored — 400 before appendMessage.
-  const pIds = new Set((await j(portP, `/messages?room=${ROOM[P]}`)).messages.map((m) => m.id));
+  const pIds = new Set((await j<MessagesReply>(portP, `/messages?room=${P}`)).messages.map((m) => m.id));
   ok(!pIds.has('p-str') && !pIds.has('p-kind') && !pIds.has('p-noid') && !pIds.has('p-ghost'),
      'no malformed-recipient Send was stored (the 400 fires before the message is appended)');
   srvP.kill('SIGTERM'); await sleep(1300);
 
   // ============================================================================
-  // [v9.1 #53] Teardown seam — request → supervise directive → clears on consume → /done
+  // [v9.1 #53] Teardown seam — request → /pending teardown item → clears on consume → /done
   // ============================================================================
   // The operator's confirm-gated close-session control posts a distinct teardown-request (a CONTROL
   // signal, not a chat Message). The bridge holds a per-room teardown-requested flag, exposes it on
-  // /canvas-status, and surfaces it to the LEAD's supervise=1 poll as a teardown directive — the
+  // /canvas-status, and hands it to the LEAD's GET /pending pull as a teardown item — the
   // same signal-not-act pattern as a revive directive: the bridge raises it, the lead performs the
   // graceful POST /done. This whole seam is new in v9.1 (no /request-teardown endpoint, no
   // teardownRequested field, no teardown branch exist pre-v9.1), so every assertion below depends on
@@ -169,35 +185,35 @@ async function main() {
   const portT = await srvT._port;
 
   // baseline: nothing requested, and no chat messages yet.
-  const st0 = await j(portT, '/canvas-status');
+  const st0 = await j<CanvasStatus>(portT, '/canvas-status');
   ok(!st0.teardownRequested, '/canvas-status reports teardownRequested falsy before any request');
-  const msgs0 = (await j(portT, `/messages?room=${ROOM[T]}`)).messages.length;
+  const msgs0 = (await j<MessagesReply>(portT, `/messages?room=${T}`)).messages.length;
 
   // the operator presses the close-session control → a distinct teardown-request intake.
-  eq(await postStatus(portT, '/request-teardown', { room: ROOM[T] }),
+  eq(await postStatus(portT, '/request-teardown', { room: T }),
      200, 'POST /request-teardown returns 200');
-  const st1 = await j(portT, '/canvas-status');
+  const st1 = await j<CanvasStatus>(portT, '/canvas-status');
   eq(st1.teardownRequested, true, '/canvas-status exposes teardownRequested:true after the request');
 
   // it is a control signal, NOT a chat Message — the attributed log is unchanged (§8.2 v9.1).
-  const msgs1 = (await j(portT, `/messages?room=${ROOM[T]}`)).messages.length;
+  const msgs1 = (await j<MessagesReply>(portT, `/messages?room=${T}`)).messages.length;
   eq(msgs1, msgs0, 'the teardown-request did not enter the chat log (it is a control signal, not a Message)');
 
-  // the lead's supervisor poll surfaces the teardown directive. No pending lead Send and no worker
-  // needing revive, so teardown is the only thing the poll can return (precedence-independent).
-  const tdir = await superviseOrNull(portT, 'lead-sid', 3000);
-  ok(isTeardown(tdir), 'the supervise=1 poll surfaces a teardown directive (kind:"teardown")');
+  // the lead's pull returns the teardown item. No pending lead Send and no worker needing revive,
+  // so teardown is the only item the pull can return.
+  const tdir = (await leadPull(portT)).find(isTeardown);
+  ok(isTeardown(tdir), 'the lead pull returns a teardown item (kind:"teardown")');
 
-  // the flag CLEARS on consume — status flips back and a second poll does not re-issue (no storm).
-  const st2 = await j(portT, '/canvas-status');
-  eq(st2.teardownRequested, false, 'teardownRequested clears once the supervise poll consumes the directive');
-  const tdir2 = await superviseOrNull(portT, 'lead-sid', 900);
+  // the flag CLEARS on consume — status flips back and a second pull does not re-issue (no storm).
+  const st2 = await j<CanvasStatus>(portT, '/canvas-status');
+  eq(st2.teardownRequested, false, 'teardownRequested clears once the lead pull consumes the directive');
+  const tdir2 = (await leadPull(portT)).find(isTeardown);
   ok(!isTeardown(tdir2), 'the teardown directive is not re-issued after it is consumed (no re-fire storm)');
 
   // durable floor under teardown: a teardown REQUEST must not corrupt or displace the queue — an
   // ordinary lead Send still drains normally afterward (teardown never enters a recipient queue).
   await post(portT, '/message', { text: 'still works', idempotencyKey: 't-still' });
-  const drained = await nextOrNull(portT, 3000);
+  const drained = (await leadPull(portT)).find((i) => i.kind === 'send');
   ok(drained && drained.id === 't-still', 'an ordinary lead Send still drains after a teardown request (queue intact)');
 
   // the graceful close the lead performs on a teardown directive. NOTE: POST /done shuts the process
@@ -207,14 +223,16 @@ async function main() {
   const done = await post(portT, '/done', {});
   ok(done.ok === true, 'POST /done (the lead\'s graceful teardown) returns ok');
   await sleep(1200);
-  ok(!fs.existsSync(SB.files(SB.board(T)).lock), 'board T lock removed by the graceful /done');
+  ok(!fs.existsSync(path.join(HOME, `${T}.lock`)), 'board T lock removed by the graceful /done');
 
+  // any straggler + clean scratch
+  for (const s of [srvP, srvT]) { try { s.kill('SIGKILL'); } catch {} }
+  await sleep(200);
   cleanupFiles();
 
   console.log(`\n${failures.length ? 'FAIL' : 'PASS'} — ${passed} checks passed, ${failures.length} failed`);
-  if (failures.length) { for (const f of failures) console.log(`  - ${f}`); process.exitCode = 1; }
+  if (failures.length) { for (const f of failures) console.log(`  - ${f}`); process.exit(1); }
+  process.exit(0);
 }
 
-main()
-  .catch((e) => { console.error('\nERROR', e); process.exitCode = 1; })
-  .finally(async () => { await stopAllServers(); process.exit(process.exitCode ?? 0); });
+main().catch((e) => { console.error('\nERROR', e); process.exit(1); });

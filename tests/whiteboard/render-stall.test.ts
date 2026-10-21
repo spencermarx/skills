@@ -17,61 +17,105 @@
 //      is observable without byte-diffing the PNG.
 //
 // The render-canvas here is a FAKE ws client joined as role=agent; there is no Playwright and no live
-// board. Every server boots on an ephemeral port (PORT=0) in this suite's own throwaway repository,
-// so no running board is ever touched.
+// board. Every server boots on an ephemeral port (its port record is removed first) against a
+// wbtest_* board in this suite's own throwaway repository, so no running board is ever touched.
 //
-//   node tests/whiteboard/render-stall.test.mjs
+//   node --import tsx tests/whiteboard/render-stall.test.ts      (run from the skill's server/)
 
+import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CANVAS_KEY, SERVER_DIR, sandbox, startServer, stopAllServers } from './harness.mjs';
+import type { Readable } from 'node:stream';
+import { CANVAS_KEY, SERVER_DIR, sandbox } from './harness.mjs';
 
-// ws comes from the skill's server/node_modules: this suite lives outside the skill folder.
-const { WebSocket } = createRequire(path.join(SERVER_DIR, 'package.json'))('ws');
+// This suite lives outside the skill: ws loads from the skill's server/node_modules.
+const { WebSocket } = createRequire(path.join(SERVER_DIR, 'package.json'))('ws') as typeof import('ws');
+// Boot the server the way the skill does (node with the tsx loader in-process, no tsx CLI
+// wrapper), so the spawned child IS the server and killing it never orphans a board.
+const BOOT_ARGS = ['--import', 'tsx', 'index.ts'];
+// No suite server may ring a real session's inbox, take its identity, or read an exported PORT.
+const SCRUBBED_ENV = { CLAUDE_CODE_MESSAGING_SOCKET: undefined, CLAUDE_CODE_MESSAGING_TOKEN: undefined,
+  CLAUDE_CODE_SESSION_ID: undefined, CLAUDE_PID: undefined, CLAUDE_JOB_DIR: undefined, PORT: undefined };
+
+// This suite's own throwaway repository; HOME is its boards folder.
 const SB = sandbox('render-stall');
-
+const HOME: string = SB.home;
 
 // --- tiny assertion harness -------------------------------------------------
 let passed = 0;
-const failures = [];
-function ok(cond, msg) {
+const failures: string[] = [];
+function ok(cond: unknown, msg: string): void {
   if (cond) { passed++; console.log(`  ✓ ${msg}`); }
   else { failures.push(msg); console.log(`  ✗ ${msg}`); }
 }
-function eq(actual, expected, msg) {
+function eq(actual: unknown, expected: unknown, msg: string): void {
   ok(actual === expected, `${msg} (got ${JSON.stringify(actual)}, want ${JSON.stringify(expected)})`);
 }
 
-// --- boot a bridge in this suite's own throwaway repository -----------------
-const boot = (board, extraEnv = {}) => startServer(SB, SB.board(board), extraEnv);
+// --- boot a bridge, resolve its port from stdout ----------------------------
+type Server = ChildProcessByStdio<null, Readable, Readable> & { _port: Promise<number> };
+function boot(board: string, extraEnv: Record<string, string> = {}): Server {
+  const boardPath = path.join(HOME, `${board}.tldr`);
+  try { fs.rmSync(boardPath, { force: true }); } catch {}
+  try { fs.rmSync(path.join(HOME, `${board}.messages.jsonl`), { force: true }); } catch {}
+  try { fs.rmSync(path.join(HOME, `${board}.port`), { force: true }); } catch {} // a fresh, ephemeral port
+  try { fs.rmSync(path.join(HOME, `${board}.png`), { force: true }); } catch {} // start with NO good frame
+  const child = spawn(process.execPath, BOOT_ARGS, {
+    cwd: SERVER_DIR,
+    env: { ...process.env, ...SCRUBBED_ENV, ...SB.env, WHITEBOARD_CANVAS_KEY: CANVAS_KEY, WHITEBOARD_NO_CANVAS: '1', WHITEBOARD_BOARD: boardPath, ...extraEnv },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const port = new Promise<number>((resolve, reject) => {
+    let buf = '';
+    const onData = (d: Buffer): void => {
+      buf += d.toString();
+      const m = buf.match(/WHITEBOARD_PORT=(\d+)/);
+      if (m) { child.stdout.off('data', onData); resolve(Number(m[1])); }
+    };
+    child.stdout.on('data', onData);
+    child.on('exit', (code) => reject(new Error(`server ${board} exited early (code ${code})\n${buf}`)));
+    setTimeout(() => reject(new Error(`server ${board} never printed a port\n${buf}`)), 20000);
+  });
+  return Object.assign(child, { _port: port });
+}
 
-const boardPng = (board) => SB.files(SB.board(board)).png;
-const statOrNull = (p) => { try { return fs.statSync(p); } catch { return null; } };
+const boardPng = (board: string) => path.join(HOME, `${board}.png`);
+const statOrNull = (p: string): fs.Stats | null => { try { return fs.statSync(p); } catch { return null; } };
 
 // A GET /image that returns { status, body } instead of throwing, so we can assert on the status code.
-async function getImage(port) {
+interface ImageBody { path?: string; error?: string }
+interface ImageResult { status: number; body: ImageBody | null }
+async function getImage(port: number): Promise<ImageResult> {
   const r = await fetch(`http://127.0.0.1:${port}/image`);
-  let body = null;
-  try { body = await r.json(); } catch {}
+  let body: ImageBody | null = null;
+  try { body = await r.json() as ImageBody; } catch {}
   return { status: r.status, body };
 }
-const canvasStatus = (port) => fetch(`http://127.0.0.1:${port}/canvas-status`).then((r) => r.json());
+interface CanvasStatus {
+  connected?: boolean; lastExportOk?: boolean | null; lastExportError?: string | null;
+  lastExportAt?: number | null; lastImageBytes?: number | null;
+}
+const canvasStatus = (port: number): Promise<CanvasStatus> =>
+  fetch(`http://127.0.0.1:${port}/canvas-status`).then((r) => r.json() as Promise<CanvasStatus>);
 
 // A FAKE render-canvas: a ws client joined as role=agent. Its response to each export-image frame is
 // governed by the mutable `behavior` (id, ws) => void|Promise, so a single socket drives every phase.
-async function fakeRenderCanvas(port) {
+type Behavior = (id: string, ws: WebSocket) => void | Promise<void>;
+interface FakeCanvas { ws: WebSocket; behavior: Behavior | null; lastExportId: string | null }
+interface ExportFrame { type?: string; id: string }
+async function fakeRenderCanvas(port: number): Promise<FakeCanvas> {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/events?role=agent&canvasKey=${CANVAS_KEY}`);
-  const rc = { ws, behavior: null, lastExportId: null };
+  const rc: FakeCanvas = { ws, behavior: null, lastExportId: null };
   ws.on('message', async (raw) => {
-    let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
+    let msg: ExportFrame; try { msg = JSON.parse(raw.toString()) as ExportFrame; } catch { return; }
     if (msg.type === 'export-image') {
       rc.lastExportId = msg.id;
       if (rc.behavior) await rc.behavior(msg.id, ws);
     }
   });
-  await new Promise((resolve, reject) => {
+  await new Promise<void>((resolve, reject) => {
     ws.once('open', resolve);
     ws.once('error', reject);
   });
@@ -80,24 +124,25 @@ async function fakeRenderCanvas(port) {
 
 // Behaviors the fake can wear ------------------------------------------------
 // Success mirrors the real app: POST the PNG to /image-upload and AWAIT it, THEN send ok:true.
-const PNG = (n) => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(n, 0xab)]);
-async function uploadPng(port, id, bytes) {
-  const r = await fetch(`http://127.0.0.1:${port}/image-upload?id=${encodeURIComponent(id)}`, {
+const PNG = (n: number) => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(n, 0xab)]);
+// `id` is whatever export id the test captured, possibly none yet; it goes into the URL as it is.
+async function uploadPng(port: number, id: string | null | undefined, bytes: number): Promise<unknown> {
+  const r = await fetch(`http://127.0.0.1:${port}/image-upload?id=${encodeURIComponent(String(id))}`, {
     method: 'POST', headers: { 'content-type': 'image/png' }, body: PNG(bytes),
   });
   return r.json();
 }
-const succeedWith = (port, bytes) => async (id, ws) => {
+const succeedWith = (port: number, bytes: number): Behavior => async (id, ws) => {
   await uploadPng(port, id, bytes);
   ws.send(JSON.stringify({ type: 'image', id, ok: true }));
 };
-const failWith = (error) => (id, ws) => {
+const failWith = (error: string): Behavior => (id, ws) => {
   ws.send(JSON.stringify({ type: 'image', id, ok: false, error }));
 };
 
 async function main() {
   const board = 'wbtest_render_stall';
-  const server = boot(board, { WHITEBOARD_LEAD_GRACE_MS: '60000' });
+  const server = boot(board);
   const port = await server._port;
   const rc = await fakeRenderCanvas(port);
   try {
@@ -118,12 +163,12 @@ async function main() {
 
     // ---- Phase 2: THE BUG — a failed export must NOT serve the stale good frame as 200 ------------
     console.log('\n[PHASE 2] a failed export returns 503, NEVER a stale 200 (the regression)');
-    const mtimeBefore = statOrNull(boardPng(board)).mtimeMs;
+    const mtimeBefore = fs.statSync(boardPng(board)).mtimeMs;
     rc.behavior = failWith('simulated toImage throw (WebGL context lost)');
     const bad = await getImage(port);
     eq(bad.status, 503, 'INVARIANT: GET /image returns 503 on a failed export (not a stale 200)');
     ok(bad.body && /export-image failed/.test(bad.body.error ?? ''), 'the 503 carries the export error');
-    const mtimeAfter = statOrNull(boardPng(board)).mtimeMs;
+    const mtimeAfter = fs.statSync(boardPng(board)).mtimeMs;
     eq(mtimeAfter, mtimeBefore, 'the on-disk PNG mtime did NOT advance (no write happened) — proves it was a real failure, not a re-render');
     const cs2 = await canvasStatus(port);
     eq(cs2.lastExportOk, false, 'canvas-status.lastExportOk flips to false — the stall is now observable');
@@ -141,7 +186,7 @@ async function main() {
     // ---- Phase 4: the idx=0 hazard — a mismatched-id frame resolves NO waiter ---------------------
     console.log('\n[PHASE 4] a stray frame with the wrong id does not resolve a parked /image waiter');
     // Park a waiter but answer with a BOGUS id (as the removed idx=0 fallback would have mis-resolved).
-    let parkedId = null;
+    let parkedId = null as string | null;
     rc.behavior = (id, ws) => {
       parkedId = id;
       ws.send(JSON.stringify({ type: 'image', id: `bogus-${id}`, ok: true })); // wrong id, claims success
@@ -164,7 +209,7 @@ async function main() {
     // to the oldest waiter (A). Both waiters resolve to the same on-disk path, so we assert on WHICH
     // waiter settles WHEN, which is exactly what exact-id routing governs.
     console.log('\n[PHASE 5] two concurrent /image waiters resolve strictly by id');
-    const ids = [];
+    const ids: string[] = [];
     rc.behavior = (id) => { ids.push(id); }; // hold both; the test drives resolution order
     const pA = getImage(port);
     for (let i = 0; i < 30 && ids.length < 1; i++) await sleep(50);
@@ -175,7 +220,7 @@ async function main() {
     // Resolve the SECOND waiter (B) first.
     await uploadPng(port, ids[1], 70);
     rc.ws.send(JSON.stringify({ type: 'image', id: ids[1], ok: true }));
-    const bDone = await Promise.race([pB, sleep(1500).then(() => 'PENDING')]);
+    const bDone = await Promise.race([pB, sleep(1500).then(() => 'PENDING' as const)]);
     ok(bDone !== 'PENDING' && bDone.status === 200, 'INVARIANT: resolving id B settles waiter B (200)');
     const aStillPending = await Promise.race([pA, sleep(300).then(() => 'STILL_PENDING')]);
     eq(aStillPending, 'STILL_PENDING', 'INVARIANT: waiter A is untouched while only B was resolved');
@@ -186,7 +231,7 @@ async function main() {
     // Now resolve A properly.
     await uploadPng(port, ids[0], 90);
     rc.ws.send(JSON.stringify({ type: 'image', id: ids[0], ok: true }));
-    const aDone = await Promise.race([pA, sleep(1500).then(() => 'PENDING')]);
+    const aDone = await Promise.race([pA, sleep(1500).then(() => 'PENDING' as const)]);
     ok(aDone !== 'PENDING' && aDone.status === 200, 'waiter A settles 200 once its own id is resolved');
 
     // ---- Phase 6: an empty board (ok:false, NO error) must NOT flip health false (no crying wolf) --
@@ -195,14 +240,14 @@ async function main() {
     await getImage(port);
     const csHealthy = await canvasStatus(port);
     eq(csHealthy.lastExportOk, true, 'precondition: health is true after a good export');
-    const mtimeHealthy = statOrNull(boardPng(board)).mtimeMs;
+    const mtimeHealthy = fs.statSync(boardPng(board)).mtimeMs;
     rc.behavior = (id, ws) => ws.send(JSON.stringify({ type: 'image', id, ok: false })); // no error = empty board
     const empty = await getImage(port);
     eq(empty.status, 503, 'an empty-board export still returns 503 (never a stale 200)');
     ok(empty.body && /no image produced/.test(empty.body.error ?? ''), 'the 503 explains there was no image produced');
     const csAfterEmpty = await canvasStatus(port);
     eq(csAfterEmpty.lastExportOk, true, 'INVARIANT: an empty board does NOT flip lastExportOk false — the signal does not cry wolf');
-    eq(statOrNull(boardPng(board)).mtimeMs, mtimeHealthy, 'no write happened on the empty-board export');
+    eq(fs.statSync(boardPng(board)).mtimeMs, mtimeHealthy, 'no write happened on the empty-board export');
 
     // ---- Phase 7: a failed /image-upload write rejects PROMPTLY and flips health false -------------
     // If the server's writeFile throws, the app (which does not check response.ok) still sends ok:true;
@@ -226,13 +271,12 @@ async function main() {
     }
   } finally {
     try { rc.ws.close(); } catch {}
-    await stopAllServers();
+    server.kill('SIGKILL');
   }
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
-  if (failures.length) { for (const f of failures) console.log(`  FAILED: ${f}`); process.exitCode = 1; }
+  if (failures.length) { for (const f of failures) console.log(`  FAILED: ${f}`); process.exit(1); }
+  process.exit(0);
 }
 
-main()
-  .catch((e) => { console.error(e); process.exitCode = 1; })
-  .finally(async () => { await stopAllServers(); process.exit(process.exitCode ?? 0); });
+main().catch((e) => { console.error(e); process.exit(1); });
