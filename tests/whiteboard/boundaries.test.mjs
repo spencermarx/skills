@@ -13,9 +13,12 @@
 //   6. A board it cannot load is never overwritten: unparseable JSON and tldraw.com's file format exit
 //      1 at boot and answer 422 on a switch, leaving the file byte-identical.
 //   7. A switch whose outgoing board cannot be saved is refused (503): the server stays on it, keeps
-//      its lock, takes no lock on the target, and says in the panel that saving failed.
-//   8. Naming: /board/new uses the one slug rule, an agent without a name is "Agent", and boards.mjs
-//      locates a board in WHITEBOARD_HOME (exit 3 live, 0 free, 2 refused).
+//      its lock, takes no lock on the target, and says in the panel that saving failed. So is a
+//      switch onto another file of the hosted board's name: the board stays on the file left, and
+//      so it does when the save check passes but the final flush fails, saved once the file can be.
+//   8. Naming: /board/new uses the one slug rule, refuses a name recorded outside the repository
+//      (403), and takes its room from the file a symlinked name leads to; an agent without a name is
+//      "Agent", and boards.mjs locates a board in WHITEBOARD_HOME (exit 3 live, 0 free, 2 refused).
 //
 //   node --import tsx tests/whiteboard/boundaries.test.mjs   (cwd: the skill's server/)
 
@@ -229,6 +232,64 @@ async function unsavedSwitch() {
   }
 }
 
+async function unsavedRefile() {
+  console.log('\n[7b] a same-name switch whose file left cannot be saved is refused');
+  const folder = path.join(SB.root, 'locked-same');
+  const board = path.join(folder, 'samename.tldr');
+  writeValidBoard(board);
+  const target = path.join(SB.root, 'docs', 'samename.tldr');
+  writeValidBoard(target);
+  const server = startServer(SB, board);
+  const port = await server.port;
+  const room = SB.room(board);
+  fs.chmodSync(folder, 0o555);
+  try {
+    const sw = await postJson(port, '/board/open', { path: target });
+    eq(sw.status, 503, 'the switch onto another file of the name is refused (503)');
+    ok(/cannot be saved/.test(sw.body?.error ?? ''), `saying why (${sw.body?.error})`);
+    const status = await json(port, '/canvas-status');
+    eq(status.activeRoom, room, 'the server keeps the name');
+    eq(status.boardPath, board, 'on the file left');
+    eq(JSON.parse(fs.readFileSync(SB.files(board).lock, 'utf8')).boardPath, board, 'and its lock still names that file');
+  } finally {
+    fs.chmodSync(folder, 0o755);
+    await stopServer(server);
+  }
+}
+
+async function failedRefileFlush() {
+  console.log('\n[7c] a same-name switch whose final flush fails stays on the file left');
+  const board = path.join(SB.root, 'flushfail', 'flushfail.tldr');
+  writeValidBoard(board);
+  const target = path.join(SB.root, 'docs', 'flushfail.tldr');
+  writeValidBoard(target);
+  const server = startServer(SB, board);
+  const port = await server.port;
+  const room = SB.room(board);
+  // The folder stays writable, so the save check's temp file is written; the board's file is now a
+  // folder, so the final flush's rename onto it fails.
+  fs.rmSync(board);
+  fs.mkdirSync(board);
+  try {
+    const sw = await postJson(port, '/board/open', { path: target });
+    eq(sw.status, 503, `the switch is refused once the final flush fails (503: ${sw.body?.error})`);
+    const status = await json(port, '/canvas-status');
+    eq(status.activeRoom, room, 'the server keeps the name');
+    eq(status.boardPath, board, 'on the file left');
+    eq(JSON.parse(fs.readFileSync(SB.files(board).lock, 'utf8')).boardPath, board, 'and its lock still names that file');
+    fs.rmdirSync(board);
+    let saved = false;
+    for (let i = 0; i < 20 && !saved; i++) {
+      await sleep(250);
+      saved = fs.existsSync(board) && fs.statSync(board).isFile();
+    }
+    ok(saved, 'the kept room is saved to the file left once it can be');
+  } finally {
+    if (fs.existsSync(board) && fs.statSync(board).isDirectory()) fs.rmdirSync(board);
+    await stopServer(server);
+  }
+}
+
 async function naming(port) {
   console.log('\n[8] naming');
   await postJson(port, '/agent-message', { text: 'hello from nobody' });
@@ -238,6 +299,31 @@ async function naming(port) {
   eq(made.status, 200, '/board/new answers 200');
   eq(made.body?.room, 'Sales-Engine-Design', 'with the slug rule\'s room');
   eq(made.body?.path, path.join(SB.home, 'Sales-Engine-Design.tldr'), 'in the boards folder');
+
+  // A name recorded at a file outside the repository is a 403 (a gone one is a 409: cross-checkout).
+  const far = path.join(path.dirname(SB.root), `wb-far-${process.pid}`, 'far.tldr');
+  writeValidBoard(far);
+  try {
+    fs.writeFileSync(path.join(SB.home, 'far.port'), JSON.stringify({ board: 'far', boardPath: far }));
+    const refused = await postJson(port, '/board/new', { name: 'far' });
+    eq(refused.status, 403, '/board/new on a name recorded outside the repository is a 403');
+    ok(/outside this checkout/.test(refused.body?.error ?? ''), `saying why (${refused.body?.error})`);
+  } finally {
+    fs.rmSync(path.dirname(far), { recursive: true, force: true });
+  }
+
+  // [port] The room is the resolved file's, so a symlinked <home>/foo.tldr is the board it leads to.
+  const real = path.join(SB.root, 'docs', 'bar.tldr');
+  writeValidBoard(real);
+  fs.symlinkSync(real, path.join(SB.home, 'foo.tldr'));
+  const linked = await postJson(port, '/board/new', { name: 'foo' });
+  eq(linked.status, 200, '/board/new through a symlinked name answers 200');
+  eq(linked.body?.room, 'bar', 'with the room of the file it leads to');
+  eq(linked.body?.path, real, 'and that file');
+  ok(fs.existsSync(path.join(SB.home, 'bar.lock')) && !fs.existsSync(path.join(SB.home, 'foo.lock')), 'whose lock is the one taken');
+  const found = locate(['--name', 'foo']);
+  eq(found.status, 3, 'and locate --name finds it live');
+  eq(JSON.parse(found.stdout || '{}').room, 'bar', 'under that room');
 }
 
 const locate = (args) => spawnSync(process.execPath, [path.join(SERVER_DIR, 'boards.mjs'), ...args, '--home', SB.home, '--repo', SB.root], { encoding: 'utf8' });
@@ -269,6 +355,8 @@ async function main() {
   await unloadable(port);
   await boardsCli(port, boardPath);
   await unsavedSwitch();
+  await unsavedRefile();
+  await failedRefileFlush();
   await naming(port);
 }
 

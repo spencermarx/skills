@@ -23,8 +23,9 @@ import {
   createBindingId,
   toRichText,
   inlineBase64AssetStore,
+  isEqual,
 } from 'tldraw'
-import type { Editor, TLShapeId } from 'tldraw'
+import type { Editor, TLPageId, TLShape, TLShapeId } from 'tldraw'
 import { useSync } from '@tldraw/sync'
 import 'tldraw/tldraw.css'
 import './App.css'
@@ -53,6 +54,7 @@ import {
   type Recipient,
   type SendState,
 } from './bridge'
+import { drawOverview, drawRegion, regionShapes } from './overview'
 import { MultiAgentPresence, type PresenceFrame } from './presence'
 
 // ── PNG export caps (render-canvas OOM guard) ───────────────────────────────
@@ -76,6 +78,17 @@ const EXPORT_MAX_PX = 2200
 // smaller. (The bridge value is env-tunable; the render-cap test lowers it deliberately, but
 // with no app running there is no client timeout to invert.)
 const EXPORT_TIMEOUT_MS = 12_000
+// [#70] A picture that would draw more shapes than this in full detail is drawn as an outline
+// overview instead (./overview.ts). editor.toImage costs about 2 ms a shape, so this keeps a
+// full-detail export near 4 s, well inside EXPORT_TIMEOUT_MS on a slow or degraded Chromium.
+const FULL_DETAIL_MAX_SHAPES = 2_000
+
+// [#70] tldraw's default maxShapesPerPage is 4,000, and at it createShapes refuses the whole batch
+// with no error. Raised on every surface, the operator's tab included, so a board grows past it; the
+// room itself has no cap. The editor also spaces z-indexes by this number, so it stays finite.
+// Module-level so <Tldraw> gets the same options object on every render.
+const MAX_SHAPES_PER_PAGE = 20_000
+const TLDRAW_OPTIONS = { maxShapesPerPage: MAX_SHAPES_PER_PAGE }
 
 // A page-coordinate export region an agent can request to zoom in on a piece of
 // the board (x/y = top-left, w/h = size, all in page units from GET /shapes).
@@ -252,6 +265,10 @@ let currentExecAuthor: AuthorIdentity | null = null
 // waiting for (runExec), so none should outlive its answer; if one does, its `finally` must not clear
 // the next exec's author.
 let latestExec = 0
+// [#70] The writes tldraw refused the running /exec's blob, recorded by installExecShapeGuard, and the
+// pages whose shape cap has already refused one of them. Set around the blob as currentExecAuthor is;
+// `null` between blobs, so a write outside any exec is never checked. See ExecRefusals.
+let currentExecRefusals: ExecRefusals | null = null
 
 // [v5] The operator's identity on the human surface, resolved once from the URL.
 const HUMAN_AUTHOR: AuthorIdentity = (() => {
@@ -447,8 +464,11 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as
 // only a shape util's onBeforeCreate would repair. Those remain the server-owned
 // detect → harvest → reload → reapply recovery's job (SPEC §5, slice C); this guard only
 // REDUCES how often recovery has to fire. It is installed on the agent render-canvas
-// only (the sole surface that runs /exec); remote sync merges bypass these methods, so
-// human peers are never guarded.
+// only (the sole surface that runs /exec), so human peers are never guarded. A remote
+// sync merge writes the store directly and so bypasses these methods, but the side
+// effects it fires (arrow bindings, groups) call them on the render-canvas; that is why
+// the [#70] refusal checks below skip a call made while the store is merging remote
+// changes or running any store operation's side effects.
 
 type ExecShapePartial = Record<string, unknown>
 
@@ -513,38 +533,329 @@ function validateExecShapes(
   }
 }
 
-// Patch the agent render-canvas's shape-write methods to validate-first, and to refuse a create onto
-// an id that exists. createShape and
-// updateShape both delegate to these plurals internally, so wrapping the two covers all
-// four. Returns a disposer that restores the original methods.
+// [#70] tldraw refuses some writes without throwing. createShapes past maxShapesPerPage refuses the
+// whole batch and only emits `max-shapes` (a toast no one sees on the headless canvas), as paste,
+// duplicateShapes and moveShapesToPage do at the cap; updateShapes and deleteShapes skip a locked
+// shape, and duplicateShapes and groupShapes leave one out. A refused write leaves the room unmoved,
+// which the bridge cannot tell from a read, so /exec answered ok:true for a draw that never happened.
+//
+// The guard checks only the writes the blob itself makes: a wrapped call made while an exec is
+// running (currentExecRefusals is set), that is the outermost wrapped call (a depth counter), and that
+// does not come from the store (a remote merge, or the side effects any store change fires, which run
+// inside an atomic op). _isInAtomicOp is the test that holds: in 5.4.2 Store sets isMergingRemoteChanges
+// only inside an atomic op and clears it before a merge's after-effects, so that flag alone misses them,
+// and is read as well only in case a later tldraw merges outside one. tldraw's own calls from bindings, groups, duplicate and paste rely on the silent
+// skip (an arrow in a locked frame stays as it is when the box it points at is deleted), so they pass
+// straight to the originals; a throw there rolled back a valid delete, crashed the canvas, or looped
+// its sync. A refusal is recorded on the exec's list, never thrown: a throw would roll back the blob's
+// own editor.run or be swallowed by its own try. The exec handler fails the exec with every refusal
+// once the blob ends (formatRefusals). An update or delete of an id that does not exist stays a no-op
+// (SPEC §5, tolerant execution).
+
+// The page a `max-shapes` event names: the full page, which for moveShapesToPage is the target.
+type MaxShapesEvent = { pageId: TLPageId; name: string; count: number }
+
+// The write methods whose lock refusals are grouped, and how each one's message words the refusal.
+type LockMethod = 'updateShapes' | 'deleteShapes' | 'duplicateShapes' | 'groupShapes'
+const LOCK_WORDING: Record<LockMethod, { verb: string; needs: (it: string) => string }> = {
+  updateShapes: { verb: 'changed', needs: (it) => `${it} changed` },
+  deleteShapes: { verb: 'deleted', needs: (it) => `${it} gone` },
+  duplicateShapes: { verb: 'copied', needs: (it) => it },
+  groupShapes: { verb: 'grouped', needs: (it) => it },
+}
+
+// The shapes one method left alone for one lock: their own (no holder), or one locked ancestor's.
+type LockGroup = { method: LockMethod; holder?: TLShapeId; ids: Set<TLShapeId> }
+
+// [#70] One exec's refusals, in the order first seen. A lock refusal joins its method-and-holder
+// group, so a blob restyling 300 shapes in a locked frame, or calling updateShape in a loop, has one
+// line to answer, not one per shape or per call. The cap, page-full and unknown-cause messages are
+// already one per call or per page, so they are kept as written, once each.
+type ExecRefusals = {
+  entries: (string | LockGroup)[]
+  groups: Map<string, LockGroup>
+  fullPages: Set<string>
+}
+
+const newExecRefusals = (): ExecRefusals => ({ entries: [], groups: new Map(), fullPages: new Set() })
+
+// Record one refusal on the running exec's list, once.
+function recordRefusal(message: string): void {
+  const refusals = currentExecRefusals
+  if (refusals && !refusals.entries.includes(message)) refusals.entries.push(message)
+}
+
+// Record a shape a lock kept the blob's `method` from writing; `holder` is the locked ancestor, when
+// the lock is not the shape's own.
+function recordLockRefusal(method: LockMethod, id: TLShapeId, holder?: TLShapeId): void {
+  const refusals = currentExecRefusals
+  if (!refusals) return
+  const key = `${method} ${holder ?? ''}`
+  let group = refusals.groups.get(key)
+  if (!group) {
+    group = { method, holder, ids: new Set() }
+    refusals.groups.set(key, group)
+    refusals.entries.push(group)
+  }
+  group.ids.add(id)
+}
+
+// How many lines formatRefusals gives an exec's refusals, and how many ids one group's line names.
+const REFUSAL_LINES_MAX = 10
+const REFUSAL_IDS_MAX = 5
+
+// One group's line. A group of one shape keeps the singular sentence; a larger one says how many,
+// and names the first few in parentheses after the cause.
+function lockGroupLine({ method, holder, ids }: LockGroup): string {
+  const { verb, needs } = LOCK_WORDING[method]
+  const list = [...ids]
+  if (list.length === 1) {
+    const cause = holder ? `${holder} holding it is locked` : 'it is locked'
+    return `${method}: ${list[0]} not ${verb}, because ${cause}; do not redo it: if the Send needs ${needs('it')}, ` +
+      `ask the operator to unlock ${holder ?? 'it'}`
+  }
+  const shown = list.slice(0, REFUSAL_IDS_MAX).join(', ')
+  const more = list.length > REFUSAL_IDS_MAX ? `, and ${list.length - REFUSAL_IDS_MAX} more` : ''
+  const cause = holder ? `${holder} holding them is locked` : 'they are locked'
+  return `${method}: ${list.length} shapes not ${verb}, because ${cause} (${shown}${more}); do not redo them: ` +
+    `if the Send needs ${needs('them')}, ask the operator to unlock ${holder ?? 'them'}`
+}
+
+// [#70] An exec's refusals as the lines of its error, in the order first seen: at most
+// REFUSAL_LINES_MAX, then one line counting the rest. The exec handler joins them with a newline,
+// which the guard's own wording never holds, where every message holds `; `.
+function formatRefusals({ entries }: ExecRefusals): string[] {
+  const lines = entries.map((e) => (typeof e === 'string' ? e : lockGroupLine(e)))
+  if (lines.length <= REFUSAL_LINES_MAX) return lines
+  const rest = lines.length - REFUSAL_LINES_MAX
+  return [...lines.slice(0, REFUSAL_LINES_MAX), `and ${rest} more ${rest === 1 ? 'refusal' : 'refusals'}`]
+}
+
+// Record a page's shape cap refusing a write other than the blob's own createShapes, once per exec
+// per page: a blob that keeps writing to a full page has one cause to report, not one per write.
+function recordPageFull(editor: Editor, { pageId, name, count }: MaxShapesEvent): void {
+  const refusals = currentExecRefusals
+  if (!refusals || refusals.fullPages.has(pageId)) return
+  refusals.fullPages.add(pageId)
+  recordRefusal(
+    `a write was refused: page "${name}" holds ${editor.getPageShapeIds(pageId).size} shapes and may hold ` +
+      `at most ${count}; nothing was added to it, and a move left its shapes where they were; do not redo ` +
+      `it: ask the operator where to continue`,
+  )
+}
+
+// Whether the write runs inside editor.run(..., { ignoreShapeLock: true }), where tldraw applies
+// writes to locked shapes.
+function ignoringShapeLock(editor: Editor): boolean {
+  return !!(editor as unknown as { _shouldIgnoreShapeLock?: boolean })._shouldIgnoreShapeLock
+}
+
+// Whether the partial would change the shape, over the keys it sets (props and meta key by key). One
+// that would not, such as a re-lock or toggleLock on a set where some are locked already, is not a
+// refusal even when tldraw skips it.
+function partialChangesShape(shape: TLShape, partial: ExecShapePartial): boolean {
+  const prev = shape as unknown as Record<string, unknown>
+  const next = applyUpdatePartial(prev, partial)
+  for (const [k, v] of Object.entries(partial)) {
+    if (v === undefined || k === 'id' || k === 'type' || k === 'typeName') continue
+    if ((k === 'props' || k === 'meta') && v && typeof v === 'object') {
+      const before = (prev[k] ?? {}) as Record<string, unknown>
+      const after = next[k] as Record<string, unknown>
+      for (const key of Object.keys(v)) if (!isEqual(before[key], after[key])) return true
+      continue
+    }
+    if (!isEqual(prev[k], next[k])) return true
+  }
+  return false
+}
+
+// The shape whose lock makes tldraw skip this partial, by its own rule in Editor.updateShapes: a
+// locked shape takes only an update that unlocks it, and an unlocked shape under a locked ancestor
+// takes none. The shape itself, or its nearest locked ancestor; null when tldraw applies the partial.
+function lockHoldingShape(editor: Editor, shape: TLShape, partial: ExecShapePartial): TLShape | null {
+  if (ignoringShapeLock(editor)) return null
+  if (shape.isLocked) return Object.hasOwn(partial, 'isLocked') && !partial.isLocked ? null : shape
+  if (!editor.isShapeOrAncestorLocked(shape)) return null
+  return editor.findShapeAncestor(shape, (ancestor) => ancestor.isLocked) ?? shape
+}
+
+// A shape id from a write's argument, which tldraw takes as an id or a shape.
+function shapeIdOf(v: unknown): TLShapeId | undefined {
+  const id = typeof v === 'string' ? v : v && typeof v === 'object' ? (v as { id?: unknown }).id : undefined
+  return typeof id === 'string' ? (id as TLShapeId) : undefined
+}
+
+// Patch the agent render-canvas's shape-write methods to validate-first, to refuse a create onto
+// an id that exists, and to record a write tldraw refused the blob. createShape, updateShape and
+// deleteShape delegate to these plurals internally, so wrapping the plurals covers the singulars.
+// Returns a disposer that restores the original methods.
 function installExecShapeGuard(editor: Editor): () => void {
+  // The guard reads three private tldraw members (5.4.2, all set from construction). A rename makes it
+  // misreport in the safe direction, an ok:false naming shapes the blob never touched, so a missing one
+  // is a warning: a throw here would take the whole render-canvas down.
+  const missing = [
+    !('_shouldIgnoreShapeLock' in editor) &&
+      'editor._shouldIgnoreShapeLock (a lock refusal inside editor.run(..., { ignoreShapeLock: true }) will be misreported)',
+    !('isMergingRemoteChanges' in editor.store) &&
+      'editor.store.isMergingRemoteChanges (a merge outside an atomic op, should tldraw make one, will be checked as the blob\'s)',
+    !('_isInAtomicOp' in editor.store) &&
+      "editor.store._isInAtomicOp (tldraw's own side-effect writes and the operator's merged changes during an exec will be checked as the blob's)",
+  ].filter((m): m is string => typeof m === 'string')
+  if (missing.length > 0) {
+    console.warn(
+      `[#70] the exec write guard cannot see ${missing.join('; ')}, most likely because a tldraw upgrade ` +
+        `renamed ${missing.length === 1 ? 'it' : 'them'}: an exec may answer ok:false for writes that landed, ` +
+        'or name shapes the blob never touched',
+    )
+  }
   const target = editor as unknown as {
     createShapes: (shapes: unknown[]) => unknown
     updateShapes: (partials: unknown[]) => unknown
+    deleteShapes: (ids: unknown[]) => unknown
+    duplicateShapes: (...args: unknown[]) => unknown
+    groupShapes: (...args: unknown[]) => unknown
   }
+  const store = editor.store as unknown as { isMergingRemoteChanges?: boolean; _isInAtomicOp?: boolean }
   const origCreate = target.createShapes.bind(editor)
   const origUpdate = target.updateShapes.bind(editor)
+  const origDelete = target.deleteShapes.bind(editor)
+  const origDuplicate = target.duplicateShapes.bind(editor)
+  const origGroup = target.groupShapes.bind(editor)
+
+  // How many wrapped calls are running: tldraw's own calls inside one run at depth 1 or more.
+  let depth = 0
+  const deeper = <T,>(fn: () => T): T => {
+    depth++
+    try {
+      return fn()
+    } finally {
+      depth--
+    }
+  }
+  // Whether this wrapped call is one the blob made itself, and so is checked.
+  const isBlobWrite = () =>
+    currentExecRefusals !== null && depth === 0 && !store.isMergingRemoteChanges && !store._isInAtomicOp
+
+  // A `max-shapes` during the blob's own createShapes belongs to that call; any other during an exec
+  // (paste, duplicate, moveShapesToPage, or tldraw's own create) is the page being full.
+  let claimCap = false
+  let claimedCap: MaxShapesEvent | null = null
+  const onMax = (event: MaxShapesEvent) => {
+    if (claimCap) {
+      claimedCap ??= event
+      return
+    }
+    if (currentExecRefusals && !store.isMergingRemoteChanges) recordPageFull(editor, event)
+  }
+  editor.on('max-shapes', onMax)
+
   target.createShapes = (shapes: unknown[]) => {
-    const list = Array.isArray(shapes) ? shapes : []
+    if (!Array.isArray(shapes)) return origCreate(shapes) // tldraw throws its own error
     // tldraw's createShapes on an id that exists replaces that shape whole (store.put): props not
     // passed reset, and the shape another draw or the operator made is overwritten with ok:true.
     // Refuse it, so an id collision is an error the agent sees, never a silent overwrite.
-    for (const s of list) {
+    for (const s of shapes) {
       const id = s && typeof s === 'object' ? (s as { id?: unknown }).id : undefined
       if (typeof id === 'string' && editor.getShape(id as TLShapeId)) {
         throw new Error(`createShapes: ${id} already exists; change it with updateShapes`)
       }
     }
-    validateExecShapes(editor, list, 'createRecord')
-    return origCreate(shapes)
+    validateExecShapes(editor, shapes, 'createRecord')
+    if (!isBlobWrite()) return deeper(() => origCreate(shapes))
+    // Give a partial without an id the one tldraw would generate, so what landed can be checked.
+    const withIds = shapes.map((s) =>
+      s && typeof s === 'object' && !(s as { id?: unknown }).id ? { ...s, id: createShapeId() } : s,
+    )
+    claimCap = true
+    claimedCap = null
+    let result: unknown
+    try {
+      result = deeper(() => origCreate(withIds))
+    } finally {
+      claimCap = false
+    }
+    const cap = claimedCap as MaxShapesEvent | null
+    claimedCap = null
+    const missing = withIds
+      .map(shapeIdOf)
+      .filter((id): id is TLShapeId => id !== undefined && !editor.getShape(id))
+    if (missing.length > 0 && cap) {
+      recordRefusal(
+        `createShapes: page "${cap.name}" holds ${editor.getPageShapeIds(cap.pageId).size} shapes and may hold ` +
+          `at most ${cap.count}, so tldraw created none of these ${withIds.length}; do not redo them: ask the ` +
+          `operator where to continue`,
+      )
+    } else if (missing.length > 0) {
+      recordRefusal(
+        `createShapes: tldraw created ${withIds.length - missing.length} of ${withIds.length} shapes and refused ` +
+          `${missing.join(', ')} without an error`,
+      )
+    } else if (cap) {
+      recordPageFull(editor, cap) // every shape landed, so the cap refused a write tldraw made inside
+    }
+    return result
   }
+
   target.updateShapes = (partials: unknown[]) => {
-    validateExecShapes(editor, Array.isArray(partials) ? partials : [], 'updateRecord')
-    return origUpdate(partials)
+    const list = Array.isArray(partials) ? partials : []
+    validateExecShapes(editor, list, 'updateRecord')
+    if (!isBlobWrite()) return deeper(() => origUpdate(partials))
+    const refused: { id: TLShapeId; holder?: TLShapeId }[] = []
+    for (const raw of list) {
+      if (!raw || typeof raw !== 'object') continue
+      const partial = raw as ExecShapePartial
+      const shape = editor.getShape(partial.id as TLShapeId)
+      if (!shape) continue
+      const holder = lockHoldingShape(editor, shape, partial)
+      if (!holder || !partialChangesShape(shape, partial)) continue
+      refused.push({ id: shape.id, holder: holder.id === shape.id ? undefined : holder.id })
+    }
+    const result = deeper(() => origUpdate(partials)) // the unlocked partials still apply
+    for (const { id, holder } of refused) recordLockRefusal('updateShapes', id, holder)
+    return result
   }
+
+  target.deleteShapes = (ids: unknown[]) => {
+    if (!Array.isArray(ids) || !isBlobWrite() || ignoringShapeLock(editor)) return deeper(() => origDelete(ids))
+    // tldraw skips a shape whose own isLocked is set; an unlocked child of a locked frame is deleted.
+    const present = ids.map(shapeIdOf).filter((id): id is TLShapeId => id !== undefined && !!editor.getShape(id))
+    const result = deeper(() => origDelete(ids))
+    for (const id of present) if (editor.getShape(id)) recordLockRefusal('deleteShapes', id)
+    return result
+  }
+
+  // duplicateShapes and groupShapes leave out an input whose own isLocked is set
+  // (Editor._getUnlockedShapeIds) before any write, so the locked inputs are the ones refused.
+  const lockedInputs = (shapes: unknown): TLShapeId[] =>
+    !Array.isArray(shapes) || ignoringShapeLock(editor)
+      ? []
+      : shapes.map(shapeIdOf).filter((id): id is TLShapeId => id !== undefined && !!editor.getShape(id)?.isLocked)
+
+  target.duplicateShapes = (...args: unknown[]) => {
+    if (!isBlobWrite()) return deeper(() => origDuplicate(...args))
+    const locked = lockedInputs(args[0])
+    const result = deeper(() => origDuplicate(...args))
+    for (const id of locked) recordLockRefusal('duplicateShapes', id)
+    return result
+  }
+
+  target.groupShapes = (...args: unknown[]) => {
+    if (!isBlobWrite()) return deeper(() => origGroup(...args))
+    // tldraw groups nothing from fewer than two inputs, locked or not, so only a real group refuses.
+    const shapes = args[0]
+    const locked = Array.isArray(shapes) && shapes.length > 1 ? lockedInputs(shapes) : []
+    const result = deeper(() => origGroup(...args))
+    for (const id of locked) recordLockRefusal('groupShapes', id)
+    return result
+  }
+
   return () => {
+    editor.off('max-shapes', onMax)
     target.createShapes = origCreate
     target.updateShapes = origUpdate
+    target.deleteShapes = origDelete
+    target.duplicateShapes = origDuplicate
+    target.groupShapes = origGroup
   }
 }
 
@@ -1052,35 +1363,54 @@ function App() {
   // Two modes, one raster cap (EXPORT_MAX_PX longest side, pixelRatio pinned to
   // 1 — see the constant): a bird's-eye of the WHOLE board (no region), and a
   // higher-fidelity crop of a REQUESTED region (an agent leaning in on a piece).
-  // Passing ALL shape ids in both modes lets tldraw clip to `bounds` while still
-  // rendering shapes that straddle the region edge.
+  // [#70] A region draws only the shapes whose bounds meet it, at any depth, and
+  // tldraw clips to `bounds`, so a shape straddling the edge still shows. A frame or
+  // group that reaches outside the region is not exported whole: its members that
+  // meet the region stand in for it, and such a frame is drawn by its outline and
+  // name (regionShapes / drawRegion in ./overview.ts), so a zoom costs what it shows.
+  // Either mode draws as an outline overview when it would draw more than
+  // FULL_DETAIL_MAX_SHAPES in full, so the export's cost stays bounded as the board grows.
   const exportPng = useCallback(async (region?: ExportRegion): Promise<Blob | null> => {
     const editor = editorRef.current
     if (!editor) return null
-    const ids = editor.getCurrentPageShapes().map((s) => s.id)
-    if (ids.length === 0) return null // toImage needs at least one shape
+    if (editor.getCurrentPageShapeIds().size === 0) return null // an empty board: nothing to render
 
     const bounds = region
       ? new Box(region.x, region.y, region.w, region.h)
       : editor.getCurrentPageBounds()
     if (!bounds) return null // no content bounds ⇒ nothing to render
+    // `shapes` is everything the picture would draw, descendants included, and its
+    // size is the count the threshold reads.
+    const picked = region ? regionShapes(editor, bounds) : null
+    const shapes = picked ? picked.meets : editor.getCurrentPageShapeIds()
+    const ids = picked ? picked.ids : [...shapes]
 
     // Downscale so longest_side × scale ≤ EXPORT_MAX_PX. A small region stays at
     // scale 1 (full detail); only an oversized area shrinks. pixelRatio:1 undoes
     // the bitmap default of 2 (which would quadruple the raster and drive the OOM).
     const longest = Math.max(bounds.width, bounds.height)
     const scale = longest > EXPORT_MAX_PX ? EXPORT_MAX_PX / longest : 1
+    // A region is an exact crop (0). The whole-board box comes from
+    // getCurrentPageBounds() (already tight), so a little padding keeps edge
+    // strokes/arrowheads from clipping without meaningfully growing the raster.
+    const padding = region ? 0 : 8
 
+    // A region with nothing in it is drawn as its empty background (toImage needs a shape).
+    if (shapes.size === 0 || shapes.size > FULL_DETAIL_MAX_SHAPES) {
+      return drawOverview(editor, shapes, { bounds, scale, padding })
+    }
+    // A region that cuts through a frame, or meets only the gaps of a group, has
+    // its picture assembled around tldraw's export.
+    if (picked && (picked.frames.length > 0 || ids.length === 0)) {
+      return drawRegion(editor, ids, picked.frames, { bounds, scale, padding })
+    }
     const { blob } = await editor.toImage(ids, {
       format: 'png',
       background: true,
       bounds,
       scale,
       pixelRatio: 1,
-      // A region is an exact crop (0). The whole-board box comes from
-      // getCurrentPageBounds() (already tight), so a little padding keeps edge
-      // strokes/arrowheads from clipping without meaningfully growing the raster.
-      padding: region ? 0 : 8,
+      padding,
     })
     return blob
   }, [])
@@ -1141,6 +1471,12 @@ function App() {
           // and the bridge answers that it may have drawn (runExec).
           const thisExec = ++latestExec
           editor.markHistoryStoppingPoint('exec')
+          // [#70] The guard records each write tldraw refused the blob on this exec's list rather than
+          // throwing (installExecShapeGuard), so the blob runs to its end; the exec then fails with its
+          // refusals, grouped and bounded (formatRefusals), one to a line, after the blob's own error when
+          // it threw. A blob that ran to its end still sends what it returned.
+          const refusals = newExecRefusals()
+          currentExecRefusals = refusals
           try {
             const fn = AsyncFunction('editor', 'createShapeId', 'createBindingId', 'toRichText', code)
             const result = await fn(editor, createShapeId, createBindingId, toRichText)
@@ -1150,11 +1486,19 @@ function App() {
             } catch {
               safeResult = String(result)
             }
-            send({ type: 'exec-result', id, ok: true, result: safeResult })
+            const refused = formatRefusals(refusals)
+            if (refused.length > 0) {
+              send({ type: 'exec-result', id, ok: false, error: String(new Error(refused.join('\n'))), result: safeResult })
+            } else {
+              send({ type: 'exec-result', id, ok: true, result: safeResult })
+            }
           } catch (err) {
-            send({ type: 'exec-result', id, ok: false, error: String(err) })
+            send({ type: 'exec-result', id, ok: false, error: [String(err), ...formatRefusals(refusals)].join('\n') })
           } finally {
-            if (thisExec === latestExec) currentExecAuthor = null // a later exec's author stays
+            if (thisExec === latestExec) {
+              currentExecAuthor = null // a later exec's author and refusals stay
+              currentExecRefusals = null
+            }
           }
           // [render-cap] No spontaneous post-exec export here. The bridge's runExec
           // issues its OWN `export-image` request after the exec-result settles
@@ -1564,8 +1908,9 @@ function App() {
 
     // [v9.5, SPEC §5] Agent render-canvas only: install the validate-first exec write
     // guard so a schema-invalid /exec record is rejected (ok:false with the validation
-    // message) before it can flip the store's sticky corruption flag. The human surface
-    // never runs /exec, so it is left unguarded.
+    // message) before it can flip the store's sticky corruption flag, and [#70] so a write
+    // tldraw refused the blob fails the exec. The human surface never runs /exec, so it is
+    // left unguarded.
     const uninstallGuard = ROLE === 'agent' ? installExecShapeGuard(editor) : null
 
     const dispose = () => {
@@ -1655,16 +2000,19 @@ function App() {
   // [v9.11 #64] A switch is transactional on the server. A 200 means the server has moved to the
   // board it names in `room` (or, with `attach`, that another live process hosts it), so the
   // panel follows it. Any failure means nothing changed: the server answers 409 when the board is
-  // still being released or its owner does not answer, or [#65] while a server from before #64
-  // runs (its `error` names each one's pid, port and board, for the operator to have stopped), and
-  // 422 when the board would not load, in every case still on this board. The panel therefore stays where it is and shows the server's
-  // `error` text; a network error or a body with no `error` gets a generic line.
+  // still being released or its owner does not answer, [#71] when another server holds the board's
+  // name for another file, [#72] when a bare name's recorded file no longer exists (/board/new), or
+  // [#65] while a server from before #64 runs (its `error` names each one's pid, port and board, for
+  // the operator to have stopped), and 422 when the board would not load, in every case still on
+  // this board. The panel therefore stays where it is and shows the server's `error` text, its own
+  // full stop dropped so the sentence ends once; a network error or a body with no `error` gets a
+  // generic line.
   const failedSwitch = useCallback(
     (what: string, err: unknown) => {
       console.error(`${what} failed`, err)
       const reason =
         err instanceof HttpError
-          ? (err.serverError ?? `the board server answered ${err.status}`)
+          ? (err.serverError?.replace(/\.$/, '') ?? `the board server answered ${err.status}`)
           : 'the board server could not be reached'
       showBoardError(`Could not ${what}: ${reason}. You are still on this board.`)
     },
@@ -1786,7 +2134,7 @@ function App() {
     return (
       <div className="wb-root wb-agent">
         <div className="wb-canvas">
-          <Tldraw store={store} onMount={onMount} />
+          <Tldraw store={store} options={TLDRAW_OPTIONS} onMount={onMount} />
         </div>
       </div>
     )
@@ -1807,7 +2155,7 @@ function App() {
       </button>
 
       <div className="wb-canvas">
-        <Tldraw store={store} onMount={onMount} />
+        <Tldraw store={store} options={TLDRAW_OPTIONS} onMount={onMount} />
         {/* [v9.6, fix 4] Silent-data-loss guard. A canvas overlay (not a panel notice) so it
             survives panel-collapse and is unmissable. `serverClosing` is definitive and takes
             priority; `showDisconnected` is the debounced sync-store read. role="alert" — urgent. */}
@@ -1866,7 +2214,7 @@ function App() {
                 <ul className="wb-board-menu">
                   {boards.length === 0 && <li className="wb-menu-empty">No boards yet</li>}
                   {boards.map((b) => {
-                    const active = roomForBoard(b) === ROOM
+                    const active = roomForBoard(b) === ROOM && b.active !== false
                     return (
                       <li key={b.path || b.name}>
                         <button

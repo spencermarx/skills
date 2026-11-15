@@ -1,5 +1,6 @@
-# The visual family: looking up the brand, building a deck, and designing a product
-# interface, each against the neighbour most likely to steal it. Auditing finished
+# The visual family: looking up the brand, building a deck, designing a product
+# interface and drawing on a live whiteboard, each against the neighbour most likely
+# to steal it. Auditing finished
 # creative against the brand is brand-review, in strategy.yaml.
 #
 #   bash skills/harness/harness-eval/scripts/run.sh --skills skills evals/cases/visual.yaml --repeat 3
@@ -42,3 +43,18 @@
       value: brand-review
     - type: not-skill-used
       value: prototype
+- description: "drawing live, together, on a shared board"
+  vars:
+    query: open a whiteboard and let's sketch the checkout flow together, I'll
+      draw on it too
+  assert:
+    - type: skill-used
+      value: whiteboard
+    - type: not-skill-used
+      value: create-report
+- description: "a static diagram for a document, not a live board"
+  vars:
+    query: add a diagram of the checkout flow to docs/checkout.md
+  assert:
+    - type: not-skill-used
+      value: whiteboard

@@ -56,7 +56,8 @@
 //                   [v6] `recipient` is {kind,id?,name?}; absent == the lead (v5 default).
 //   GET  /boards         → [{name, path, source, room?}]         board discovery
 //   POST /board/open       body {path}                          switch active board
-//   POST /board/new        body {name}                          create empty board
+//   POST /board/new        body {name}                          open the board the name resolves to
+//                                                               (an empty one when no file exists)
 //   POST /image-upload?id=<id>   raw body, Content-Type image/png   PNG export delivery
 //        (bridge writes the bytes to .scratchpad/whiteboard/<name>.png and owns the
 //         path; `id` correlates the upload with the exec/export that triggered it.)
@@ -180,7 +181,10 @@ export function apiUrl(path: string): string {
   return `${httpOrigin()}${path}`
 }
 
-export type BoardEntry = { name: string; path: string; source: string; room?: string }
+// [#72] `active`: whether this entry is the file the server's board is live on. Same-named copies
+// (a tracked board's copy in each checkout, say) share a `room`, so the room alone marks every copy
+// as current.
+export type BoardEntry = { name: string; path: string; source: string; room?: string; active?: boolean }
 
 export async function fetchBoards(): Promise<BoardEntry[]> {
   const res = await fetch(apiUrl('/boards'))
@@ -403,8 +407,9 @@ export async function requestTeardown(room: string): Promise<void> {
 export type OpenBoardResult = { attach: boolean; port?: number; room: string }
 
 // [v9.11 #64] A switch the server refuses (409: the board is still being released or does not
-// answer, or [#65] a server from before #64 is running, named by pid, port and board; 422: the
-// board would not load) throws an `HttpError` carrying the status and the
+// answer, [#71] another server holds its name for another file, [#72] a bare name's recorded file
+// no longer exists, or [#65] a server from before #64 is running, named by pid, port and board;
+// 422: the board would not load) throws an `HttpError` carrying the status and the
 // server's `error` text, with nothing changed on the server, so the panel stays on this board and
 // shows that text. A body that is not JSON leaves `serverError` unset.
 async function postBoard(endpoint: string, body: Record<string, string>): Promise<OpenBoardResult> {

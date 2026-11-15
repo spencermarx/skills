@@ -113,7 +113,7 @@ interface LockRecord {
   ownerSession?: string;
   ownerIsClaude?: boolean | null;
 }
-interface PortRecord { port: number; pid: number; board: string }
+interface PortRecord { port?: number; pid?: number; board: string; boardPath?: string }
 interface SnapshotDocument { state: { id: string; name?: string }; lastChangedClock?: number }
 interface Snapshot { documentClock?: number; documents: SnapshotDocument[] }
 
@@ -187,7 +187,7 @@ const { createTLSchema } = serverRequire('@tldraw/tlschema') as typeof import('@
 const { TLSyncClient } = serverRequire('@tldraw/sync-core') as typeof import('@tldraw/sync-core');
 // The published typings omit ClientWebSocketAdapter; the server's client-adapter.ts types the same
 // runtime export.
-const { ClientWebSocketAdapter } = serverRequire('@tldraw/sync-core') as unknown as typeof import('../../skills/_incubating/whiteboard/server/client-adapter.js');
+const { ClientWebSocketAdapter } = serverRequire('@tldraw/sync-core') as unknown as typeof import('../../skills/visual/whiteboard/server/client-adapter.js');
 const { atom } = serverRequire('@tldraw/state') as typeof import('@tldraw/state');
 
 // Fast doorbell timings for every ringing board: re-ring at +600/+1200/+1800 ms after the first
@@ -799,11 +799,15 @@ async function ownerSection() {
     // The record is written after listen, so the log line can come first.
     await waitFor(() => readJson<PortRecord>(portPath)?.pid === again.pid);
     eq(readJson<PortRecord>(portPath)?.pid, again.pid, 'the new owner rewrites the record under its own pid');
-    // [#64 B1] Only the operator's /done forgets the port.
+    // [#64 B1] Only the operator's /done forgets the port. [#72] It forgets the port, not the
+    // record: the record stays as { board, boardPath }, so a later bare-name open finds the file.
     ok(fs.existsSync(portPath), 'the port record exists before /done');
     await post(againPort, '/done', {});
     ok(await waitFor(() => again.exitCode !== null || again.signalCode !== null, 8000), '/done exits the server');
-    ok(!fs.existsSync(portPath), '/done removes the port record');
+    const forgotten = readJson<PortRecord>(portPath);
+    ok(forgotten !== null, '/done keeps the port record');
+    eq(forgotten?.port, undefined, '/done drops the port from the record');
+    eq(forgotten?.boardPath, path.join(fs.realpathSync(path.dirname(boardPath)), path.basename(boardPath)), "/done's record names the board's file");
     ok(!fs.existsSync(lockPath), '/done removes the lock');
   } finally {
     if (again.exitCode === null) again.kill('SIGKILL');

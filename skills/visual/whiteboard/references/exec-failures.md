@@ -3,7 +3,8 @@
 Read when `POST /exec` answers `200` with `ok:false`, and when any route answers a `503` other
 than `/image`'s `no image produced` (which is only an empty board). Read it before you retry
 anything.
-The design spec (§5) is `docs/whiteboard/SPEC.md` in https://github.com/spencermarx/skills.
+The design spec (§5, decisions #56, #64, #67 and #70) is `docs/whiteboard/SPEC.md` in
+https://github.com/spencermarx/skills.
 
 ## A `503`: the render-canvas could not answer
 
@@ -21,11 +22,16 @@ or whole. Its error ends `this blob may have drawn: read /shapes (what it wrote 
 name and an at no earlier than this answer's sentAt, in meta.createdBy or meta.lastEditedBy),
 then redo only what did not land and no one else has edited since, under a new
 idempotencyKey`. `sentAt` is a field of the answer: when the server sent the blob. That tail
-follows one of three causes:
+follows one or more of these causes, after `; ` when the error is one line and on a line of its
+own when it is several:
 
 - **the blob's own error**: a blob that throws is not undone; what it wrote before the throw
   stays, though tldraw may roll back the writes of an `editor.run` the throw escapes, and a
   throw that leaves the canvas's store corrupted sets off a recovery as well;
+- **writes tldraw refused**: tldraw refused one or more of the blob's writes, and the blob ran
+  on. The refusals come one to a line, after the blob's own error if it threw. A blob that ran to
+  its end also sends what it returned in the answer's `result`, as an `ok:true` answer does
+  (§ A write tldraw refused);
 - **`sync-severed`**: the write did not reach the room, and the server's recovery runs (below);
 - **`the render-canvas did not answer within <n> s, so`**: the blob timed out. Before
   answering, the bridge reloads or relaunches the canvas, which ends the blob, timers and all.
@@ -42,8 +48,10 @@ recovery has run, so if it awaited what it started, nothing it does lands after 
    those by id. `/shapes` lists
    only the current page, so for one on another page send an `/exec` that only reads,
    `return editor.getShape('<id>')`, and find the record in the answer's `result`.
-3. Redo only what did not land. An update or a delete can fail to land as well as a create,
-   and a relative change (a move by an offset) run again whole applies twice.
+3. Redo only what did not land, leaving out every write whose error says `do not redo`:
+   tldraw refused it and refuses it again, so it goes to the user instead. An update or a
+   delete can fail to land as well as a create, and a relative change (a move by an offset) run
+   again whole applies twice.
 4. Leave any shape whose `meta.lastEditedBy` names someone else with an `at` no earlier than
    `sentAt`: they changed it since, whether or not your write landed.
 5. Send the corrected write under a **new** `idempotencyKey`. The old key returns its first
@@ -52,6 +60,45 @@ recovery has run, so if it awaited what it started, nothing it does lands after 
 `… already exists; change it with updateShapes` means the blob created a shape on an id that
 exists. Give new shapes fresh ids with `createShapeId()` and change existing ones with
 `updateShapes` ([`tldraw-editor-api.md`](tldraw-editor-api.md) § Ids).
+
+## A write tldraw refused
+
+tldraw refuses some writes without an error; the render-canvas records each one the blob made,
+lets the blob finish, and fails the exec with all of them (SPEC §5, #70). A refusal undoes nothing
+else the blob wrote, so each line names only what did not land, and says what to do. The lines
+come in the order first seen; at most 10 are listed, and a last line, `and <K> more refusals`
+(`and 1 more refusal`), counts the rest; step 2's read of `/shapes` shows what they left
+undone.
+
+- `createShapes: page "<name>" holds <n> shapes and may hold at most <cap>, so tldraw created
+  none of these <k>`: that page is full, and none of the `<k>` shapes exist. Ask the user where
+  to continue, and draw them where they say.
+- `a write was refused: page "<name>" holds <n> shapes and may hold at most <cap>`: a paste, a
+  duplicate or a `moveShapesToPage` met that full page. Nothing was added to it; the shapes a move
+  named are still where they were, on the page they started on. Ask the user where to
+  continue.
+- `createShapes: tldraw created <a> of <k> shapes and refused <ids> without an error`: the cause
+  is unknown. Read `/shapes`, redo the ids it names once, and if they are refused again, report
+  the error to the user.
+- `updateShapes: <id> not changed, because it is locked`: the shape is unchanged. If the Send
+  needs it changed, ask the user to unlock it.
+- `updateShapes: <id> not changed, because <holder> holding it is locked`: the shape sits inside
+  a locked one and is unchanged. If the Send needs it changed, ask the user to unlock
+  `<holder>`.
+- `deleteShapes: <id> not deleted, because it is locked`: the shape is still there. If the Send
+  needs it gone, ask the user to unlock it.
+- `duplicateShapes: <id> not copied, because it is locked` or `groupShapes: <id> not grouped,
+  because it is locked`: the call went ahead without it. If the Send needs it included, ask the
+  user to unlock it.
+
+Lock refusals are grouped across the whole exec, by method and by the shape whose lock holds
+them. A group of two or more is one line that counts them and names up to five, then
+`, and <K> more`: `updateShapes: <N> shapes not changed, because they are locked (<ids>)`,
+`updateShapes: <N> shapes not changed, because <holder> holding them is locked (<ids>)`, and
+`deleteShapes: <N> shapes not deleted`, `duplicateShapes: <N> shapes not copied` or
+`groupShapes: <N> shapes not grouped, because they are locked (<ids>)`. Act on it as on the
+one-shape line: the shapes are as they were, and if the Send needs them, ask the user to
+unlock them, or `<holder>`.
 
 ## A recovery in the answer
 

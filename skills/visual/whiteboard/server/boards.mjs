@@ -8,11 +8,16 @@
 // a lock to say whether a live server holds it.
 //
 //   node boards.mjs (--board <file.tldr> | --name <name>) --home <boards folder> --repo <repository>
-//     prints {board, name, room, lock, port, messages, recipients, png, log, live} as JSON. `--name`
-//     resolves to <boards folder>/<slugFor(name)>.tldr. `live` is the lock when a live server holds
-//     the board (see liveOwner), else null. Exit 0 when nothing live holds it, 3 when a live server
-//     does, 2 on a bad argument or a board the placement rule refuses (refused before anything is
-//     created; the reason is on stderr).
+//     prints {board, name, room, lock, port, messages, recipients, png, log, live, otherFile,
+//     outsideCheckout} as JSON. `--name` resolves through boardFileForName: <boards folder>/
+//     <slugFor(name)>.tldr, or the file its port record names (resolveBoard). `live` is the lock when
+//     a live server holds the board's name (see liveOwner), else null; `otherFile` is true when that
+//     server holds another file under the name (said on stderr too); `outsideCheckout` is true when
+//     the board lies outside the repository and a live server holds exactly that file, so a session
+//     may attach to it, though nothing may boot it from here. Exit 0 when nothing live holds it, 3
+//     when a live server does, 2 on a bad argument, a board the placement rule refuses, or a name
+//     whose recorded file no longer exists (refused before anything is created; the reason is on
+//     stderr).
 
 import fs from 'node:fs';
 import http from 'node:http';
@@ -59,6 +64,38 @@ export function slugFor(name) {
     .slice(0, 80)
     .replace(/[-.]+$/g, '');
   return slug || 'board';
+}
+
+/**
+ * The file a bare board name opens, or why it opens none (SPEC decision #72 clause 6). A same-name
+ * switch moves the board onto another file and stamps `<name>.port` with it, and every exit keeps
+ * the record (/done without its port), so the record is the one pointer to the file the board was
+ * last saved to; `<name>.tldr` in the boards folder may be a copy the board has left. So:
+ *   - a record counts only if its `boardPath` is an absolute path whose file name is exactly
+ *     `<name>.tldr` (case-sensitive, as room ids compare); any other record is no record;
+ *   - no record, a record with no `boardPath`, or one naming the boards folder's `<name>.tldr`:
+ *     that file;
+ *   - a record naming a file that exists: that file;
+ *   - a record naming another file that no longer exists: refused, never the boards folder's copy,
+ *     and the record is left as it is, since it is the only pointer to that file. That copy stays
+ *     openable by its explicit path.
+ * An explicit path is never resolved through it. `name` is already a slug (slugFor).
+ * @param {string} home the boards folder, canonical
+ * @param {string} name
+ * @returns {{ ok: true, boardPath: string } | { ok: false, error: string }}
+ */
+export function boardFileForName(home, name) {
+  const inHome = canonicalBoardPath(path.join(home, `${name}.tldr`));
+  let recorded;
+  try {
+    recorded = JSON.parse(fs.readFileSync(path.join(home, `${name}.port`), 'utf8'))?.boardPath;
+  } catch {
+    return { ok: true, boardPath: inHome }; // no record, or unreadable: the name is its file in the boards folder
+  }
+  if (typeof recorded !== 'string' || !path.isAbsolute(recorded) || path.basename(recorded) !== `${name}.tldr`) return { ok: true, boardPath: inHome };
+  const boardPath = canonicalBoardPath(recorded);
+  if (boardPath === inHome || fs.existsSync(boardPath)) return { ok: true, boardPath };
+  return { ok: false, error: `board '${name}' is recorded at ${recorded}, which no longer exists; see boot-failures.md § "The name's recorded file no longer exists".` };
 }
 
 /**
@@ -113,10 +150,79 @@ export function isWithin(dir, p) {
  */
 export function placementRefusal(board, repo, home) {
   if (path.extname(board).toLowerCase() !== '.tldr') return `not a board: ${board} (a board is a .tldr file)`;
-  if (!isWithin(repo, board) && !isWithin(home, board)) return `outside the repository: ${board}`;
+  if (isOutside(board, repo, home)) return `outside the repository: ${board}`;
   const folder = path.dirname(board);
   if (folder !== home && !fs.existsSync(folder)) return `its folder does not exist: ${folder}`;
   return null;
+}
+
+/**
+ * Whether a canonical board path lies outside both the repository and the boards folder.
+ * @param {string} board
+ * @param {string} repo
+ * @param {string} home
+ * @returns {boolean}
+ */
+export function isOutside(board, repo, home) {
+  return !isWithin(repo, board) && !isWithin(home, board);
+}
+
+/**
+ * The board an explicit path or a bare name names, placed: the one composition of
+ * canonicalBoardPath or boardFileForName with placementRefusal, for `locate`, the server's boot and
+ * /board/new. A refusal's `kind` is `gone` (the name's recorded file no longer exists), `outside`
+ * (the file lies outside the repository and the boards folder; `boardPath` names it, since a live
+ * server holding exactly that file may still be attached to) or `refused` (any other placement
+ * refusal). A name's recorded file outside the repository says so, since nobody typed that path:
+ * the fix is to open it from the checkout that holds it, never to open the boards folder's copy.
+ * `name` is already a slug (slugFor); `repo` and `home` are canonical.
+ * @param {{ board: string } | { name: string }} target
+ * @param {string} repo
+ * @param {string} home
+ * @returns {{ ok: true, boardPath: string } | { ok: false, kind: 'gone' | 'outside' | 'refused', error: string, boardPath?: string }}
+ */
+export function resolveBoard(target, repo, home) {
+  let boardPath;
+  let recordedName = null; // the name, when its port record moved it off the boards folder's file
+  if ('board' in target) boardPath = canonicalBoardPath(target.board);
+  else {
+    const resolved = boardFileForName(home, target.name);
+    if (!resolved.ok) return { ok: false, kind: 'gone', error: resolved.error };
+    boardPath = resolved.boardPath;
+    if (boardPath !== canonicalBoardPath(path.join(home, `${target.name}.tldr`))) recordedName = target.name;
+  }
+  const refusal = placementRefusal(boardPath, repo, home);
+  if (!refusal) return { ok: true, boardPath };
+  if (!isOutside(boardPath, repo, home)) return { ok: false, kind: 'refused', error: refusal };
+  const error = recordedName !== null
+    ? `board '${recordedName}' is recorded at ${boardPath}, outside this checkout (${repo}); see boot-failures.md § "The name's recorded file is outside this checkout".`
+    : refusal;
+  return { ok: false, kind: 'outside', error, boardPath };
+}
+
+/**
+ * Whether something stamped with `stamp` (a lock, the port record, a chat entry, a recipient)
+ * belongs to the board whose file is `boardPath` (SPEC decision #72): the stamp names that file,
+ * compared in canonical form, or there is no stamp, as from a server older than #71 or #72, and then
+ * it counts as the board's.
+ * @param {unknown} stamp
+ * @param {string} boardPath
+ * @returns {boolean}
+ */
+export function isBoardFile(stamp, boardPath) {
+  return typeof stamp !== 'string' || canonicalBoardPath(stamp) === canonicalBoardPath(boardPath);
+}
+
+/**
+ * [#71] What a server holding `room` for another `.tldr` is answered with: it is not the board
+ * asked for, so it is never attached to or announced as already served.
+ * @param {string} room
+ * @param {{ boardPath?: string, pid: number, port: number }} owner
+ * @param {string} boardPath
+ * @returns {string}
+ */
+export function otherFileRefusal(room, owner, boardPath) {
+  return `board '${room}' is open from another file: ${owner.boardPath} (pid ${owner.pid}, port ${owner.port}); not serving ${canonicalBoardPath(boardPath)}. Close it there, or open that file.`;
 }
 
 /**
@@ -136,9 +242,10 @@ export function sidecarPaths(home, room) {
 }
 
 /**
- * The lock the bridge writes: `board` is the room id; `parentPid` the process it exits with (its own
- * pid when `detached`).
- * @typedef {{ port: number, pid: number, board?: string, startedAt?: number, ownerSession?: string,
+ * The lock the bridge writes: `board` is the room id; `boardPath` the board's file, absent in a lock
+ * from a server older than decision #71; `parentPid` the process it exits with (its own pid when
+ * `detached`).
+ * @typedef {{ port: number, pid: number, board?: string, boardPath?: string, startedAt?: number, ownerSession?: string,
  *   ownerSessionId?: string, parentPid?: number, ownerIsClaude?: boolean | null, detached?: boolean }} LockInfo
  */
 
@@ -240,14 +347,24 @@ if (isMain()) {
   }
   const home = canonicalBoardPath(args.home);
   const repo = canonicalBoardPath(args.repo);
-  const board = canonicalBoardPath(args.board ?? path.join(home, `${slugFor(args.name ?? '')}.tldr`));
-  const refusal = placementRefusal(board, repo, home);
-  if (refusal) {
-    console.error(`boards.mjs: ${refusal}`);
+  const resolved = resolveBoard(args.board ? { board: args.board } : { name: slugFor(args.name ?? '') }, repo, home);
+  if (!resolved.ok && resolved.kind !== 'outside') {
+    console.error(`boards.mjs: ${resolved.error}`);
     process.exit(2);
   }
+  const board = /** @type {string} */ (resolved.boardPath);
   const room = roomFor(board);
   const live = await liveOwner(home, room);
-  console.log(JSON.stringify({ board, name: displayName(board), room, ...sidecarPaths(home, room), live }));
+  // [#71] A live server holding this name for another file is not this board's server: never attach.
+  const otherFile = !!live && !isBoardFile(live.boardPath, board);
+  // [port] A board outside the repository is refused, unless a live server holds exactly that file,
+  // which its lock must name (a lock with no boardPath could be serving another file): attaching to
+  // it reads and writes nothing in this checkout. Nothing boots it from here.
+  if (!resolved.ok && (!live || otherFile || typeof live.boardPath !== 'string')) {
+    console.error(`boards.mjs: ${resolved.error}`);
+    process.exit(2);
+  }
+  if (live && otherFile) console.error(`boards.mjs: ${otherFileRefusal(room, live, board)}`);
+  console.log(JSON.stringify({ board, name: displayName(board), room, ...sidecarPaths(home, room), live, otherFile, outsideCheckout: !resolved.ok }));
   process.exit(live ? 3 : 0);
 }

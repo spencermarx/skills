@@ -38,10 +38,13 @@ background job (`harness-notes.md` lists Claude Code's cases). That is why stopp
 takes the board down (content safe on disk) and why it is never a way to "restart" anything. The
 user's tab shows the board closing and holds any Send typed meanwhile.
 
-- **The user is about to quit:** tell them that opening the board again (`/whiteboard open
-  <board>`, or asking for it by name) brings it back.
-- **This session was resumed:** open the board yourself (SKILL.md §1). It boots on the recorded
-  port, the tab reconnects and sends what it held, and the Sends left open come back to you.
+- **The user is about to quit:** tell them that opening the board again (asking for it by name)
+  brings it back.
+- **This session was resumed:** open the board yourself by name (SKILL.md §1). It boots the
+  board's last file (a homed board's tracked copy, say) on the recorded port, the tab reconnects
+  and sends what it held, and the Sends left open come back to you. If that file has moved or its
+  worktree was removed, it stops: follow [`boot-failures.md`](boot-failures.md) § The name's
+  recorded file no longer exists.
 - **The board's job exited while this session runs** (the job was stopped, or the server
   crashed): tell the user the board is down and that their tab holds any Send they type
   meanwhile. When they want it back, open it again, which boots it on the recorded port as above.
@@ -53,6 +56,7 @@ board over, in which case it registers as `lead` and gets the open Sends back. B
 quits, tell them the board stays up at `http://127.0.0.1:<port>` until they close it.
 
 A close by `POST /done` differs from both: it warns every browser to export, flushes the
-snapshot, stops the server and render-canvas, and removes both `<room>.lock` and `<room>.port`,
-so the next open takes a fresh port. Tearing down a board someone is still editing loses their
-unsynced edits, which is why only the user's explicit instruction authorizes it (SKILL.md §5).
+snapshot, stops the server and render-canvas, removes `<room>.lock`, and drops the port from
+`<room>.port` while keeping the board's file there, so the next open takes a fresh port on the
+same file. Tearing down a board someone is still editing loses their unsynced edits, which is why
+only the user's explicit instruction authorizes it (SKILL.md §5).

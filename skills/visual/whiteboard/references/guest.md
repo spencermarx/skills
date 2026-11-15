@@ -1,8 +1,9 @@
 # Joining a board another session owns: the guest
 
 Read at [`SKILL.md`](../SKILL.md) §1 step 2, when `locate` shows a live server that is not
-yours, and at step 3 when a detached start prints someone else's `live`. The design spec
-(§8.3) is `docs/whiteboard/SPEC.md` in https://github.com/spencermarx/skills.
+yours on the file you resolved (`otherFile` is `false`), and at step 3 when a detached start
+prints someone else's `live`. The design spec (§8.3, decisions #57, #64, #71 and #72) is
+`docs/whiteboard/SPEC.md` in https://github.com/spencermarx/skills.
 
 ## Booting is what makes an owner
 

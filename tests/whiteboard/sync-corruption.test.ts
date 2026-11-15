@@ -195,7 +195,7 @@ const { createTLSchema } = serverRequire('@tldraw/tlschema') as typeof import('@
 const { TLSyncClient } = serverRequire('@tldraw/sync-core') as typeof import('@tldraw/sync-core');
 // The published typings omit ClientWebSocketAdapter; the server's client-adapter.ts types the runtime
 // export.
-const { ClientWebSocketAdapter } = serverRequire('@tldraw/sync-core') as unknown as typeof import('../../skills/_incubating/whiteboard/server/client-adapter.js');
+const { ClientWebSocketAdapter } = serverRequire('@tldraw/sync-core') as unknown as typeof import('../../skills/visual/whiteboard/server/client-adapter.js');
 const { atom } = serverRequire('@tldraw/state') as typeof import('@tldraw/state');
 
 type SyncClient = TLSyncClientType<TLRecord, TLStore>;

@@ -1,7 +1,7 @@
 // Runs the whiteboard skill's suites under `node --test tests/`. They live in tests/whiteboard/ so
 // they never ship inside the skill. Every suite (`*.test.mjs` and `*.test.ts`) runs as
 // `node --import tsx <suite>` from the skill's server/ folder, so tsx and the server's dependencies
-// resolve; they need only those dependencies (`npm ci --prefix skills/_incubating/whiteboard/server`,
+// resolve; they need only those dependencies (`npm ci --prefix skills/visual/whiteboard/server`,
 // which CI runs) and skip without them. Most cases boot the real bridge headless
 // (WHITEBOARD_NO_CANVAS). The cases that need Chromium or the built app (busy-loop, render-cap's
 // real-canvas phases, sync-corruption's real-canvas boards, the real-browser boundaries,
@@ -10,17 +10,18 @@
 // server it starts.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import http from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = join(dirname(fileURLToPath(import.meta.url)), "whiteboard");
-const skill = join(here, "..", "..", "skills", "_incubating", "whiteboard");
+const skill = join(here, "..", "..", "skills", "visual", "whiteboard");
 const serverDir = join(skill, "server");
 const notInstalled = !existsSync(join(serverDir, "node_modules", "tsx", "package.json"))
-  && "the whiteboard server's dependencies are not installed (npm ci --prefix skills/_incubating/whiteboard/server)";
+  && "the whiteboard server's dependencies are not installed (npm ci --prefix skills/visual/whiteboard/server)";
 
 for (const suite of readdirSync(here).filter((f) => /\.test\.(mjs|ts)$/.test(f)).sort()) {
   test(`whiteboard ${suite}`, { skip: notInstalled }, () => {
@@ -254,5 +255,155 @@ test("whiteboard.sh start --detach: a server that exits early is reported with i
     assert.match(run.stderr, /is already served/, "the end of the log is shown");
     const left = readdirSync(join(sk.repo, ".scratchpad", "whiteboard")).filter((f) => f.includes(".exit."));
     assert.deepEqual(left, [], "no exit-code file is left behind");
+  }
+});
+
+// The port's exits that turn on a live server, against a stand-in in this process: liveOwner needs
+// only a lock whose pid and parentPid are alive (this process's) and a /canvas-status naming the
+// room. So the scripts run asynchronously here, never with spawnSync, which would leave the
+// stand-in unable to answer.
+function runAsync(cmd, args) {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
+}
+const homeOf = (sk) => join(sk.repo, ".scratchpad", "whiteboard");
+const shAsync = (sk, ...args) => runAsync("bash", [join(sk.copy, "scripts", "whiteboard.sh"), ...args, "--repo", sk.repo]);
+const boardsCli = (sk, ...args) => runAsync(process.execPath, [join(sk.copy, "server", "boards.mjs"), ...args, "--home", homeOf(sk), "--repo", sk.repo]);
+const writeTo = (p, body) => { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, body); };
+// A port record naming `boardPath` as the file of the board called `room`.
+const recordAt = (sk, room, boardPath) => writeTo(join(homeOf(sk), `${room}.port`), JSON.stringify({ port: 1, pid: 1, board: room, boardPath }));
+
+// A live server holding `room` for `boardPath`, as liveOwner sees one.
+async function liveStandIn(sk, room, boardPath) {
+  const server = http.createServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ activeRoom: room }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  const lock = join(homeOf(sk), `${room}.lock`);
+  writeTo(lock, JSON.stringify({ port, pid: process.pid, parentPid: process.pid, board: room, boardPath, startedAt: Date.now() }));
+  return {
+    port,
+    close: () => new Promise((resolve) => { rmSync(lock, { force: true }); server.closeAllConnections(); server.close(resolve); }),
+  };
+}
+
+test("locate --name: follows the name's port record to its file, and refuses once that file is gone", async () => {
+  const sk = bareSkill();
+  const tracked = join(sk.repo, "docs", "plan.tldr");
+  writeTo(tracked, "{}");
+  recordAt(sk, "plan", tracked);
+  const found = await shAsync(sk, "locate", "--name", "plan");
+  assert.equal(found.status, 0, found.stderr);
+  const where = JSON.parse(found.stdout);
+  assert.equal(where.board, tracked, "the name opens the file its record names");
+  assert.equal(where.lock, join(homeOf(sk), "plan.lock"), "with its files in the boards folder");
+  rmSync(tracked);
+  for (const args of [["locate"], ["start"], ["start", "--detach"]]) {
+    const gone = await shAsync(sk, ...args, "--name", "plan");
+    assert.equal(gone.status, 2, `${args.join(" ")}: ${gone.stdout}${gone.stderr}`);
+    assert.ok(gone.stderr.includes(`board 'plan' is recorded at ${tracked}, which no longer exists`), gone.stderr);
+  }
+  assert.ok(!existsSync(join(homeOf(sk), "plan.tldr")), "the boards folder's copy is never opened in its place");
+  assert.ok(!existsSync(join(homeOf(sk), "plan.log")), "nor a log created");
+  assert.equal(JSON.parse(readFileSync(join(homeOf(sk), "plan.port"), "utf8")).boardPath, tracked, "and the record is left as it is");
+});
+
+test("locate: a name recorded outside this checkout is refused, unless a live server holds exactly that file", async () => {
+  const sk = bareSkill();
+  // The file a linked worktree's name may be recorded at: another checkout's, outside --repo.
+  const outside = join(dirname(sk.repo), "main", "docs", "plan.tldr");
+  writeTo(outside, "{}");
+  recordAt(sk, "plan", outside);
+  const refusal = `board 'plan' is recorded at ${outside}, outside this checkout (${sk.repo})`;
+  const cold = await boardsCli(sk, "--name", "plan");
+  assert.equal(cold.status, 2, cold.stderr);
+  assert.ok(cold.stderr.includes(refusal), cold.stderr);
+  for (const args of [["locate"], ["start"], ["start", "--detach"]]) {
+    const run = await shAsync(sk, ...args, "--name", "plan");
+    assert.equal(run.status, 2, `${args.join(" ")}: ${run.stdout}${run.stderr}`);
+    assert.ok(run.stderr.includes(refusal), run.stderr);
+  }
+  assert.ok(!existsSync(join(homeOf(sk), "plan.log")), "nothing was created");
+
+  const exact = await liveStandIn(sk, "plan", outside);
+  try {
+    for (const target of [["--name", "plan"], ["--board", outside]]) {
+      const live = await boardsCli(sk, ...target);
+      assert.equal(live.status, 3, `${target.join(" ")}: ${live.stderr}`);
+      const where = JSON.parse(live.stdout);
+      assert.equal(where.board, outside);
+      assert.equal(where.live?.port, exact.port, "live names the server holding that file");
+      assert.equal(where.otherFile, false);
+      assert.equal(where.outsideCheckout, true);
+    }
+    const located = await shAsync(sk, "locate", "--name", "plan");
+    assert.equal(located.status, 0, located.stderr);
+    assert.equal(JSON.parse(located.stdout).outsideCheckout, true);
+    for (const args of [["start"], ["start", "--detach"]]) {
+      const attach = await shAsync(sk, ...args, "--name", "plan");
+      assert.equal(attach.status, 3, `${args.join(" ")}: ${attach.stdout}${attach.stderr}`);
+      assert.match(attach.stderr, /already live; attach to it/);
+      assert.match(attach.stderr, /"outsideCheckout":true/, "with the JSON to attach with");
+    }
+  } finally {
+    await exact.close();
+  }
+
+  const other = await liveStandIn(sk, "plan", join(sk.repo, "docs", "plan.tldr"));
+  try {
+    const live = await boardsCli(sk, "--name", "plan");
+    assert.equal(live.status, 2, `a live server on another file of the name does not lift the refusal: ${live.stdout}${live.stderr}`);
+    assert.ok(live.stderr.includes(refusal), live.stderr);
+    assert.equal(live.stdout, "");
+    const start = await shAsync(sk, "start", "--name", "plan");
+    assert.equal(start.status, 2, `${start.stdout}${start.stderr}`);
+  } finally {
+    await other.close();
+  }
+
+  // A lock that names no file (a server from before #71) may be serving any file of the name.
+  const unstamped = await liveStandIn(sk, "plan", undefined);
+  try {
+    const live = await boardsCli(sk, "--name", "plan");
+    assert.equal(live.status, 2, `a live lock naming no file does not lift the refusal: ${live.stdout}${live.stderr}`);
+    assert.ok(live.stderr.includes(refusal), live.stderr);
+  } finally {
+    await unstamped.close();
+  }
+});
+
+test("locate: a live server holding the name for another file is never attached to", async () => {
+  const sk = bareSkill();
+  const elsewhere = join(sk.repo, "docs", "plan.tldr");
+  writeTo(elsewhere, "{}");
+  const other = await liveStandIn(sk, "plan", elsewhere);
+  try {
+    const live = await boardsCli(sk, "--name", "plan");
+    assert.equal(live.status, 3, live.stderr);
+    const where = JSON.parse(live.stdout);
+    assert.equal(where.board, join(homeOf(sk), "plan.tldr"), "with no record the name is the boards folder's file");
+    assert.equal(where.otherFile, true);
+    assert.equal(where.outsideCheckout, false);
+    assert.ok(live.stderr.includes(`board 'plan' is open from another file: ${elsewhere}`), live.stderr);
+    const located = await shAsync(sk, "locate", "--name", "plan");
+    assert.equal(located.status, 0, located.stderr);
+    assert.equal(JSON.parse(located.stdout).otherFile, true);
+    for (const args of [["start"], ["start", "--detach"]]) {
+      const start = await shAsync(sk, ...args, "--name", "plan");
+      assert.equal(start.status, 3, `${args.join(" ")}: ${start.stdout}${start.stderr}`);
+      assert.match(start.stderr, /another file of this board's name is live.*neither attach nor start/);
+      assert.doesNotMatch(start.stderr, /already live|"live":/, "and no JSON to attach with");
+      assert.equal(start.stdout, "");
+    }
+    assert.ok(!existsSync(join(homeOf(sk), "plan.log")), "nothing was created");
+  } finally {
+    await other.close();
   }
 });

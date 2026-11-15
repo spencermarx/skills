@@ -13,8 +13,10 @@
 //      lastExportOk=false / lastExportError='export timed out (no frame from render-canvas)'
 //      instead of leaving the field null. This is the exact null-across-the-board signature.
 //
-// The app-side raster cap (bounds+scale+pixelRatio) and client-side toImage timeout (App.tsx) run in
-// the app and are NOT covered here (documented, not tested).
+// The app-side raster cap (bounds+scale+pixelRatio, App.tsx exportPng) is covered by Phase X, against
+// the real render-canvas: each picture's size is the region at a scale that holds its longest side to
+// 2,200 px, at pixelRatio 1. The client-side toImage timeout (App.tsx) is NOT covered (documented, not
+// tested).
 //
 // The crash relaunch (handleRenderCanvasDeath) IS covered, against the server's own real Chromium
 // (Phases C-J boot with the render-canvas on and act only on that server's child processes):
@@ -107,6 +109,33 @@
 //     IN: the check asks again at most once per 250 ms of the time it ran, writes one line when it ends, and
 //     the canvas stays up once the reloads stop. Against 219ec6d5 the check asked again and logged as often
 //     as the page navigated: 2 of its 7 checks fail. With the pause cut to 120 ms, 1 fails.
+//   - PHASE X, A BOARD PAST 4,000 SHAPES AND A WRITE TLDRAW REFUSES (#70): 4,010 shapes land in batches
+//     that straddle tldraw's default cap. The whole-board picture is an overview, its height the padded
+//     page at the 2,200 px cap plus the 28 px caption strip, and not blank; a region more than 2,000
+//     shapes meet is one too, an empty region is a picture at its size, and a region 25 shapes meet and a
+//     600x400 zoom inside a frame holding 2,500 shapes are full detail at 600x400, not blank, the zoom in
+//     well under the 12 s bound. The overview's caption text is not read: it is drawn into the PNG only.
+//     A create, id-less create, duplicate, paste or move the cap refuses, and an update or delete of a
+//     locked shape, each answer ok:false naming the full page (the target, for a move) or the shape to
+//     unlock (the locked frame, for its child), inside the blob's own try or editor.run too, after the
+//     blob's own error, and the call's other writes apply. Refusals come one to a line, the "may have
+//     drawn" tail on its own last line, and the answer carries what the blob returned: an update of 300
+//     shapes a locked frame holds, or updateShape looped on 5 locked shapes, is one grouped line naming
+//     the count, five ids and how many more; twelve locks are ten lines and "and 2 more refusals". A
+//     re-lock, toggleLock on a mixed set, an ignoreShapeLock write and a missing id stay ok:true. Deleting
+//     a box bound to an arrow in a locked frame answers ok:true with no recovery, and the operator
+//     deleting or reordering one from a peer tab leaves the canvas connected. The guard's two store
+//     flags: binding an arrow in a locked frame (tldraw reorders it in a side effect, inside the atomic
+//     op), and the operator reordering or deleting a bound box while a blob awaits, answer ok:true. With
+//     `!store._isInAtomicOp` removed from the guard, the binding and the reorder answer ok:false: 2 fail;
+//     with both store conditions removed, the delete does too: 3 fail. Removing `!store.isMergingRemoteChanges`
+//     alone fails none, because Store sets that flag only inside an atomic op.
+//     Against 86ac7794, the batch that straddles 4,000 is refused whole, leaving 3,009 shapes, and every
+//     refusal answers ok:true: 11 of its first 17 checks fail. Against 1609558d, the refusals answer in
+//     its wording, a refusal the blob's try swallows or its editor.run rolls back is lost, a duplicate or
+//     group answers ok:true, a re-lock answers ok:false, the zoom inside the frame is an overview, the
+//     bound delete crashes the canvas into a recovery, and the operator's delete and reorder reconnect its
+//     sync: 25 of 58 fail.
 //
 // Toggle-proof: reverting requestImage's `...(bounds ? {bounds} : {})` fails Phase A; reverting the
 // lastExport* assignments in the requestImage timeout fails Phase B. Against the relaunch before PR
@@ -135,7 +164,7 @@
 // blob: 5 of 18 fail.
 //
 // Every server boots on an ephemeral port (its port record is removed first) against a wbtest_*
-// board in this suite's own throwaway repository, so no running board is ever touched. Phases C-W
+// board in this suite's own throwaway repository, so no running board is ever touched. Phases C-X
 // need Playwright's Chromium and the built app, and skip without them (as in CI).
 //
 //   node --import tsx tests/whiteboard/render-cap.test.ts   (run from the skill's server/)
@@ -428,7 +457,10 @@ const canvasUp = async (port: number): Promise<boolean> => { const st = await ca
 interface SyncPeer {
   put(id: string, x: number): void;
   move(id: string, x: number): void;
-  get(id: string): { x?: number } | undefined;
+  // Set fields on a shape the room holds, as an operator's edit does (Phase X reorders by `index`).
+  patch(id: string, fields: Record<string, unknown>): void;
+  remove(id: string): void;
+  get(id: string): { x?: number; index?: string; parentId?: string } | undefined;
   close(): void;
 }
 async function syncPeer(port: number, room: string): Promise<SyncPeer> {
@@ -442,7 +474,7 @@ async function syncPeer(port: number, room: string): Promise<SyncPeer> {
   const { TLSyncClient } = serverRequire('@tldraw/sync-core') as typeof import('@tldraw/sync-core');
   // The published typings omit ClientWebSocketAdapter; the server's client-adapter.ts types the same
   // runtime export.
-  const { ClientWebSocketAdapter } = serverRequire('@tldraw/sync-core') as unknown as typeof import('../../skills/_incubating/whiteboard/server/client-adapter.js');
+  const { ClientWebSocketAdapter } = serverRequire('@tldraw/sync-core') as unknown as typeof import('../../skills/visual/whiteboard/server/client-adapter.js');
   const { atom } = serverRequire('@tldraw/state') as typeof import('@tldraw/state');
   const store = new Store({ schema: createTLSchema(), props: {} as TLStoreProps });
   const socket = new ClientWebSocketAdapter(() => `ws://127.0.0.1:${port}/sync/${room}`);
@@ -453,7 +485,9 @@ async function syncPeer(port: number, room: string): Promise<SyncPeer> {
   return {
     put: (id, x) => store.put([{ ...geoShape(id), x } as unknown as TLRecord]),
     move: (id, x) => store.put([{ ...store.get(id as TLShapeId), x } as TLRecord]),
-    get: (id) => store.get(id as TLShapeId) as { x?: number } | undefined,
+    patch: (id, fields) => store.put([{ ...store.get(id as TLShapeId), ...fields } as TLRecord]),
+    remove: (id) => store.remove([id as TLShapeId]),
+    get: (id) => store.get(id as TLShapeId) as { x?: number; index?: string; parentId?: string } | undefined,
     close: () => {
       try { client.close(); } catch { /* already closed */ }
       try { socket.close(); } catch { /* already closed */ }
@@ -1524,12 +1558,345 @@ async function phaseW() {
   }
 }
 
+// [#70] One /exec that writes, run to its answer.
+const execBlob = (port: number, code: string): Promise<ApiResponse> => postJson(port, '/exec', { code });
+// A blob that runs `body` with the page's shape cap lowered to `cap` (an expression), restoring it after.
+const withCap = (cap: string, body: string): string =>
+  `const saved = editor.options; editor.options = { ...saved, maxShapesPerPage: ${cap} }; try { ${body} } finally { editor.options = saved } return 'blob finished'`;
+// What a blob returns, read with one /exec.
+const execRead = async <T>(port: number, code: string): Promise<T> => (await execBlob(port, code)).body.result as T;
+// A GET /image and the PNG it wrote: its size from the IHDR chunk, its bytes, and how long it took.
+interface Picture { status: number; w: number; h: number; bytes: number; ms: number }
+async function picture(port: number, query = ''): Promise<Picture> {
+  const t0 = Date.now();
+  const r = await getImage(port, query);
+  const ms = Date.now() - t0;
+  const file = r.status === 200 ? (r.body as { path?: string } | null)?.path : undefined;
+  if (!file) return { status: r.status, w: 0, h: 0, bytes: 0, ms };
+  const png = fs.readFileSync(file);
+  return { status: r.status, w: png.readUInt32BE(16), h: png.readUInt32BE(20), bytes: png.length, ms };
+}
+// The app's export geometry (App.tsx exportPng, overview.ts): the longest side capped at 2,200 px, and
+// an overview's 28 px caption strip under it.
+const EXPORT_MAX_PX = 2200;
+const CAPTION_PX = 28;
+const exportScale = (w: number, h: number): number => Math.max(w, h) > EXPORT_MAX_PX ? EXPORT_MAX_PX / Math.max(w, h) : 1;
+// What /shapes lists.
+const listShapes = (port: number): Promise<(ShapeRecord & { index?: string })[]> =>
+  fetch(`http://127.0.0.1:${port}/shapes`).then((r) => r.json() as Promise<ApiBody>).then((b) => b.shapes ?? []).catch(() => []);
+
+async function phaseX() {
+  console.log('\n[PHASE X] a board grows past 4,000 shapes and keeps its picture; a write tldraw refuses the blob answers ok:false, and tldraw\'s own skips stay silent');
+  const board = 'wbtest_render_cap_shapecap';
+  const server = boot(board, CANVAS_ON);
+  const seen = new Set<number>();
+  let peer: SyncPeer | null = null;
+  try {
+    const port = await server._port;
+    ok(await waitFor(() => canvasUp(port), 30000), 'X: the render-canvas is up');
+    trackChromium(server, seen);
+    eq(await execRead(port, 'return editor.options.maxShapesPerPage'), 20000, 'X: the render-canvas\'s maxShapesPerPage is 20,000');
+    // 4,010 shapes in batches of 1,003, so the fourth batch straddles tldraw's default cap of 4,000.
+    const grow = await execBlob(port, `
+      const all = []
+      for (let i = 0; i < 4010; i++) all.push({ id: createShapeId('x' + i), type: 'geo', x: (i % 100) * 140, y: Math.floor(i / 100) * 90, props: { w: 120, h: 70, richText: toRichText('n' + i) } })
+      for (let k = 0; k < all.length; k += 1003) editor.createShapes(all.slice(k, k + 1003))
+      return editor.getCurrentPageShapeIds().size`);
+    eq(grow.body.ok, true, 'INVARIANT: X: a batch that crosses 4,000 shapes lands (ok:true)');
+    eq(grow.body.result, 4010, 'X: the page holds all 4,010 shapes');
+    ok(await waitFor(async () => (await canvasStatus(port)).roomShapes === 4010, 10000), 'X: the room holds all 4,010 shapes');
+
+    // The pictures. The whole board pads the page bounds by 8 on each side; a region is an exact crop.
+    const page = await execRead<{ w: number; h: number }>(port, 'const b = editor.getCurrentPageBounds(); return { w: b.w, h: b.h }');
+    const whole = await picture(port);
+    eq(whole.status, 200, 'INVARIANT: X: the whole-board picture renders past 4,000 shapes');
+    const wholeScale = exportScale(page.w, page.h);
+    eq(`${whole.w}x${whole.h}`, `${Math.ceil((page.w + 16) * wholeScale)}x${Math.ceil((page.h + 16) * wholeScale) + CAPTION_PX}`,
+      `INVARIANT: X: the 4,010-shape whole-board picture is an overview: the padded page at the 2,200 px cap, over a 28 px caption strip (page ${page.w}x${page.h})`);
+    // A picture of nothing at nearly the same size: an overview drawn blank would compress as small.
+    const blank = await picture(port, `?bounds=0,-20000,${page.w + 16},${page.h + 16}`);
+    ok(blank.status === 200 && whole.bytes > 5 * blank.bytes, `INVARIANT: X: the overview's pixels are not all background: its PNG is over 5x a blank picture's (${whole.bytes} b against ${blank.bytes} b)`);
+    const empty = await picture(port, '?bounds=0,-3000,600,400');
+    eq(`${empty.status} ${empty.w}x${empty.h}`, '200 600x400', 'INVARIANT: X: an empty region is a picture at exactly its size, with no caption strip');
+    // Rows 0-22 of the grid meet 0,0,14000,2000: 2,300 shapes.
+    const dense = await picture(port, '?bounds=0,0,14000,2000');
+    eq(`${dense.status} ${dense.h}`, `200 ${Math.ceil(2000 * exportScale(14000, 2000)) + CAPTION_PX}`, 'INVARIANT: X: a region more than 2,000 shapes meet is an overview, its caption strip included');
+    const small = await picture(port, '?bounds=0,0,600,400');
+    eq(`${small.status} ${small.w}x${small.h}`, '200 600x400', 'X: a region 25 shapes meet is a full-detail picture at exactly its size');
+    // The empty region above is a picture of nothing at the same 600x400: a full-detail region drawn blank would compress as small.
+    ok(small.status === 200 && small.bytes > 5 * empty.bytes, `X: that full-detail region's pixels are not all background: its PNG is over 5x the empty region's (${small.bytes} b against ${empty.bytes} b)`);
+
+    // A zoom inside a frame that holds 2,500 shapes draws only what meets it.
+    const bigFrame = await execBlob(port, `
+      editor.createShapes([{ id: 'shape:xbig', type: 'frame', x: 20000, y: 0, props: { w: 5000, h: 5000, name: 'Big' } }])
+      const kids = []
+      for (let i = 0; i < 2500; i++) kids.push({ id: createShapeId('xk' + i), type: 'geo', parentId: 'shape:xbig', x: (i % 50) * 100 + 10, y: Math.floor(i / 50) * 100 + 10, props: { w: 20, h: 20 } })
+      editor.createShapes(kids)
+      return editor.getSortedChildIdsForParent('shape:xbig').length`);
+    eq(`${bigFrame.body.ok} ${bigFrame.body.result}`, 'true 2500', 'X: a frame holds 2,500 small shapes');
+    const zoom = await picture(port, '?bounds=21005,1005,600,400');
+    eq(`${zoom.status} ${zoom.w}x${zoom.h}`, '200 600x400', 'INVARIANT: X: a 600x400 region inside a frame holding 2,500 shapes is full detail, at exactly its size with no caption strip');
+    ok(zoom.status === 200 && zoom.ms < 6000, `INVARIANT: X: that region answers well inside the 12 s export bound (${zoom.ms} ms)`);
+    // Its 20x20 shapes sit on the frame's flat fill, which compresses well, so the bar is 3x (about 4x when drawn).
+    ok(zoom.status === 200 && zoom.bytes > 3 * empty.bytes, `X: that region's pixels are not all background: its PNG is over 3x the empty region's (${zoom.bytes} b against ${empty.bytes} b)`);
+
+    // The shape cap. Each message names the full page, what it holds, the cap, and the call's count.
+    const pageName = await execRead<string>(port, 'return editor.getCurrentPage().name');
+    const count = (): Promise<number> => execRead<number>(port, 'return editor.getCurrentPageShapeIds().size');
+    let n = await count();
+    const room0 = (await canvasStatus(port)).roomShapes;
+    const capped = await execBlob(port, withCap('editor.getCurrentPageShapeIds().size + 5',
+      `editor.createShapes(Array.from({ length: 33 }, (_, k) => ({ id: createShapeId('xc' + k), type: 'geo', x: k * 20, y: -500, props: { w: 10, h: 10 } })))`));
+    eq(capped.body.ok, false, 'INVARIANT: X: a create the shape cap refuses answers ok:false');
+    const capMessage = (k: number, cap: number): string =>
+      `createShapes: page "${pageName}" holds ${n} shapes and may hold at most ${cap}, so tldraw created none of these ${k}; do not redo them: ask the operator where to continue`;
+    ok(capped.body.error?.startsWith(`Error: ${capMessage(33, n + 5)}`), `INVARIANT: X: its error names the page, its count, the cap and the 33 refused (${capped.body.error?.slice(0, 200)})`);
+    await sleep(1500);
+    eq((await canvasStatus(port)).roomShapes, room0, 'X: the refused batch drew nothing: the room holds as many shapes after a settle window');
+    const idlessAtCap = await execBlob(port, withCap('editor.getCurrentPageShapeIds().size', `editor.createShapes([{ type: 'geo', x: 0, y: -700, props: { w: 10, h: 10 } }])`));
+    ok(idlessAtCap.body.ok === false && idlessAtCap.body.error?.startsWith(`Error: ${capMessage(1, n)}`), `INVARIANT: X: an id-less create at the cap answers ok:false and names the refusal (${idlessAtCap.body.error?.slice(0, 200)})`);
+    const idless = await execBlob(port, `editor.createShapes([{ type: 'geo', x: 0, y: -700, props: { w: 10, h: 10 } }]); return editor.getCurrentPageShapeIds().size`);
+    eq(`${idless.body.ok} ${idless.body.result}`, `true ${n + 1}`, 'X: an id-less create below the cap lands (ok:true)');
+    n = await count();
+
+    const pageFull = (name: string, holds: number, cap: number): string =>
+      `a write was refused: page "${name}" holds ${holds} shapes and may hold at most ${cap}; nothing was added to it, and a move left its shapes where they were; do not redo it: ask the operator where to continue`;
+    const dup = await execBlob(port, withCap('editor.getCurrentPageShapeIds().size', `editor.duplicateShapes([createShapeId('x0')])`));
+    eq(dup.body.ok, false, 'INVARIANT: X: a duplicate the shape cap refuses answers ok:false');
+    ok(dup.body.error?.startsWith(`Error: ${pageFull(pageName, n, n)}`), `X: its error names the full page, its count and the cap (${dup.body.error?.slice(0, 200)})`);
+    const paste = await execBlob(port, withCap('editor.getCurrentPageShapeIds().size',
+      `const content = editor.getContentFromCurrentPage([createShapeId('x0')]); editor.putContentOntoCurrentPage(content); editor.putContentOntoCurrentPage(content)`));
+    const pasteError = paste.body.error ?? '';
+    eq(`${paste.body.ok} ${pasteError.split('a write was refused').length - 1}`, 'false 1', `INVARIANT: X: two pastes at the cap answer ok:false with the page-full message once (${pasteError.slice(0, 200)})`);
+    ok(pasteError.startsWith(`Error: ${pageFull(pageName, n, n)}`), 'X: that message names the full page');
+    eq(await count(), n, 'X: the refused duplicate and pastes added nothing');
+
+    const second = await execRead<string>(port, `
+      editor.createPage({ name: 'Second' })
+      const second = editor.getPages().find((p) => p.name === 'Second')
+      editor.createShapes([0, 1].map((k) => ({ id: createShapeId('xp' + k), type: 'geo', parentId: second.id, x: k * 200, y: 0 })))
+      return second.id`);
+    const move = await execBlob(port, withCap(`editor.getPageShapeIds('${second}').size`, `editor.moveShapesToPage([createShapeId('x20')], '${second}')`));
+    ok(move.body.ok === false && move.body.error?.startsWith(`Error: ${pageFull('Second', 2, 2)}`), `INVARIANT: X: a move into a full page answers ok:false and names the target page (${move.body.error?.slice(0, 200)})`);
+    deepEq(await execRead(port, `return { onSource: editor.getAncestorPageId(createShapeId('x20')) === editor.getCurrentPageId(), page: editor.getCurrentPage().name, target: editor.getPageShapeIds('${second}').size }`),
+      { onSource: true, page: pageName, target: 2 }, 'X: the refused move left its shape on the source page');
+
+    const capThenThrow = await execBlob(port, withCap('editor.getCurrentPageShapeIds().size',
+      `editor.createShapes([{ id: createShapeId('xct'), type: 'geo', x: 0, y: -900 }]); throw new Error('the blob threw')`));
+    ok(capThenThrow.body.ok === false && capThenThrow.body.error?.startsWith(`Error: the blob threw\n${capMessage(1, n)}\nthis blob may have drawn`),
+      `INVARIANT: X: a cap refusal then the blob's own throw answers the blob's error first, then the cap message, then the may-have-drawn tail, one to a line (${capThenThrow.body.error?.slice(0, 200)})`);
+
+    // Locks. Each refused message names the shape the operator would have to unlock.
+    const LOCKED = ['x1', 'x2', 'x5', 'x6', 'x7', 'x8', 'x9'];
+    const lock = await execBlob(port, `const ks = ${JSON.stringify(LOCKED)}; editor.updateShapes(ks.map((k) => ({ id: createShapeId(k), type: 'geo', isLocked: true }))); return ks.every((k) => editor.getShape(createShapeId(k)).isLocked)`);
+    eq(`${lock.body.ok} ${lock.body.result}`, 'true true', 'X: the lock setup answers ok:true and locks every shape it names');
+    const lockedUpdate = (id: string): string => `updateShapes: ${id} not changed, because it is locked; do not redo it: if the Send needs it changed, ask the operator to unlock it`;
+    const lockedDelete = (id: string): string => `deleteShapes: ${id} not deleted, because it is locked; do not redo it: if the Send needs it gone, ask the operator to unlock it`;
+    const upd = await execBlob(port, `editor.updateShapes([{ id: createShapeId('x1'), type: 'geo', x: 9999 }, { id: createShapeId('x3'), type: 'geo', x: -9999 }])`);
+    eq(upd.body.ok, false, 'INVARIANT: X: an update to a locked shape answers ok:false');
+    ok(upd.body.error?.startsWith(`Error: ${lockedUpdate('shape:x1')}`), `X: its error names the locked shape (${upd.body.error?.slice(0, 200)})`);
+    const del = await execBlob(port, `editor.deleteShapes([createShapeId('x2'), createShapeId('x4')])`);
+    eq(del.body.ok, false, 'INVARIANT: X: a delete of a locked shape answers ok:false');
+    ok(del.body.error?.startsWith(`Error: ${lockedDelete('shape:x2')}`), `X: its error says it is locked (${del.body.error?.slice(0, 200)})`);
+    const after = await execBlob(port, `return { x3: editor.getShape(createShapeId('x3')).x, x4: !!editor.getShape(createShapeId('x4')), x1: editor.getShape(createShapeId('x1')).x }`);
+    deepEq(after.body.result, { x3: -9999, x4: false, x1: 140 }, 'X: the call\'s unlocked writes applied and the locked shapes stayed');
+
+    const swallowed = await execBlob(port, `try { editor.updateShapes([{ id: createShapeId('x1'), type: 'geo', x: 4242 }]) } catch {} return 'nothing thrown'`);
+    ok(swallowed.body.ok === false && swallowed.body.error?.startsWith(`Error: ${lockedUpdate('shape:x1')}`), `INVARIANT: X: a lock refusal inside the blob's own try/catch still answers ok:false with the lock message (${swallowed.body.error?.slice(0, 120)})`);
+
+    peer = await syncPeer(port, board);
+    const inRun = await execBlob(port, `editor.run(() => editor.updateShapes([{ id: createShapeId('x1'), type: 'geo', x: 4343 }, { id: createShapeId('x13'), type: 'geo', x: -4343 }]))`);
+    ok(inRun.body.ok === false && inRun.body.error?.startsWith(`Error: ${lockedUpdate('shape:x1')}`), `INVARIANT: X: a lock refusal inside the blob's own editor.run answers ok:false (${inRun.body.error?.slice(0, 120)})`);
+    deepEq(await execRead(port, `return [editor.getShape(createShapeId('x13')).x, editor.getShape(createShapeId('x1')).x]`), [-4343, 140], 'INVARIANT: X: the unlocked write in that editor.run lands on the canvas, and the locked shape stays');
+    const roomPeer = peer;
+    ok(await waitFor(() => roomPeer.get('shape:x13')?.x === -4343, 5000), 'INVARIANT: X: that unlocked write reaches the room');
+
+    const delShape = await execBlob(port, `editor.deleteShapes([editor.getShape(createShapeId('x7'))])`);
+    ok(delShape.body.ok === false && delShape.body.error?.startsWith(`Error: ${lockedDelete('shape:x7')}`), `X: deleteShapes given shape records reports the locked one (${delShape.body.error?.slice(0, 120)})`);
+
+    n = await count();
+    const dupLocked = await execBlob(port, `editor.duplicateShapes([createShapeId('x8'), createShapeId('x12')])`);
+    ok(dupLocked.body.ok === false && dupLocked.body.error?.startsWith('Error: duplicateShapes: shape:x8 not copied, because it is locked; do not redo it: if the Send needs it, ask the operator to unlock it'),
+      `INVARIANT: X: duplicateShapes on a locked and an unlocked shape answers ok:false naming the locked one (${dupLocked.body.error?.slice(0, 120)})`);
+    eq(await count(), n + 1, 'X: the unlocked shape is still copied');
+    const groupLocked = await execBlob(port, `editor.groupShapes([createShapeId('x9'), createShapeId('x14'), createShapeId('x15')], { groupId: createShapeId('xg') })`);
+    ok(groupLocked.body.ok === false && groupLocked.body.error?.startsWith('Error: groupShapes: shape:x9 not grouped, because it is locked; do not redo it: if the Send needs it, ask the operator to unlock it'),
+      `INVARIANT: X: groupShapes on a locked and two unlocked shapes answers ok:false naming the locked one (${groupLocked.body.error?.slice(0, 120)})`);
+    deepEq(await execRead(port, `return ['x9', 'x14', 'x15'].map((k) => editor.getShape(createShapeId(k)).parentId)`), ['page:page', 'shape:xg', 'shape:xg'], 'X: the unlocked shapes are still grouped, and the locked one is not');
+
+    eq((await execBlob(port, `editor.updateShapes([{ id: createShapeId('x1'), type: 'geo', isLocked: true }])`)).body.ok, true, 'X: re-locking a locked shape answers ok:true');
+    const toggle = await execBlob(port, `editor.toggleLock([createShapeId('x1'), createShapeId('x16')]); return editor.getShape(createShapeId('x16')).isLocked`);
+    eq(`${toggle.body.ok} ${toggle.body.result}`, 'true true', 'X: toggleLock on a locked and an unlocked shape answers ok:true and locks the unlocked one');
+    const forcedUpdate = await execBlob(port, `editor.run(() => editor.updateShapes([{ id: createShapeId('x5'), type: 'geo', x: 7777 }]), { ignoreShapeLock: true }); return editor.getShape(createShapeId('x5')).x`);
+    eq(`${forcedUpdate.body.ok} ${forcedUpdate.body.result}`, 'true 7777', 'X: an update of a locked shape inside editor.run(fn, { ignoreShapeLock: true }) answers ok:true and lands');
+    const forcedDelete = await execBlob(port, `editor.run(() => editor.deleteShapes([createShapeId('x6')]), { ignoreShapeLock: true }); return !!editor.getShape(createShapeId('x6'))`);
+    eq(`${forcedDelete.body.ok} ${forcedDelete.body.result}`, 'true false', 'X: a delete of a locked shape inside editor.run(fn, { ignoreShapeLock: true }) answers ok:true and lands');
+
+    const missing = await execBlob(port, `editor.updateShapes([{ id: createShapeId('nope'), type: 'geo', x: 1 }]); editor.deleteShapes([createShapeId('nope')]); return 1`);
+    eq(missing.body.ok, true, 'X: an update or delete of a missing id stays a no-op (ok:true)');
+
+    // A locked frame holding arrows, each bound to an unlocked box beside it in the frame, and a loose
+    // child. tldraw's own updates to those arrows, when a box is deleted or reordered, skip them in silence.
+    const F = 'shape:xlf';
+    const framed = await execBlob(port, `
+      const F = '${F}'
+      editor.createShapes([{ id: F, type: 'frame', x: -3000, y: 0, props: { w: 2000, h: 1400, name: 'Locked' } }])
+      const ks = [1, 2, 3]
+      editor.createShapes([
+        ...ks.map((k) => ({ id: 'shape:xlb' + k, type: 'geo', parentId: F, x: 600, y: k * 300, props: { w: 100, h: 80 } })),
+        ...ks.map((k) => ({ id: 'shape:xla' + k, type: 'arrow', parentId: F, x: 100, y: k * 300 + 40, props: { start: { x: 0, y: 0 }, end: { x: 520, y: 0 } } })),
+        { id: 'shape:xlc', type: 'geo', parentId: F, x: 100, y: 1200, props: { w: 80, h: 80 } },
+      ])
+      editor.createBindings(ks.map((k) => ({ type: 'arrow', fromId: 'shape:xla' + k, toId: 'shape:xlb' + k, props: { terminal: 'end', normalizedAnchor: { x: 0.5, y: 0.5 }, isExact: false, isPrecise: false, snap: 'none' } })))
+      editor.updateShapes([{ id: F, type: 'frame', isLocked: true }])
+      return { locked: editor.getShape(F).isLocked, inFrame: ks.every((k) => editor.getShape('shape:xla' + k).parentId === F), bound: ks.every((k) => editor.getBindingsFromShape('shape:xla' + k, 'arrow').length === 1) }`);
+    deepEq({ ok: framed.body.ok, ...(framed.body.result as object) }, { ok: true, locked: true, inFrame: true, bound: true }, 'X: a locked frame holds arrows bound to unlocked boxes beside them (ok:true)');
+
+    const quiet = (since: number): string[] => server._log.slice(since).split('\n').filter((l) => /\[recover\]|relaunch|peer joined room|render-canvas disconnected/.test(l));
+    let mark = server._log.length;
+    const deleteBound = await execBlob(port, `editor.deleteShapes(['shape:xlb1']); return { box: !!editor.getShape('shape:xlb1'), arrow: editor.getShape('shape:xla1')?.parentId }`);
+    deepEq({ ok: deleteBound.body.ok, ...(deleteBound.body.result as object) }, { ok: true, box: false, arrow: F },
+      `INVARIANT: X: deleting an unlocked box bound to an arrow in a locked frame answers ok:true and removes the box`);
+    await sleep(1500);
+    ok(!('recovery' in deleteBound.body) && await canvasUp(port) && quiet(mark).length === 0, `INVARIANT: X: that delete leaves the canvas up and sets off no recovery (${quiet(mark).join(' | ')})`);
+
+    const childUpdate = await execBlob(port, `editor.updateShapes([{ id: 'shape:xlc', type: 'geo', x: 150 }])`);
+    ok(childUpdate.body.ok === false && childUpdate.body.error?.startsWith(`Error: updateShapes: shape:xlc not changed, because ${F} holding it is locked; do not redo it: if the Send needs it changed, ask the operator to unlock ${F}`),
+      `INVARIANT: X: updating an unlocked child of a locked frame answers ok:false and names the frame (${childUpdate.body.error?.slice(0, 160)})`);
+    const childDelete = await execBlob(port, `editor.deleteShapes(['shape:xlc']); return !!editor.getShape('shape:xlc')`);
+    eq(`${childDelete.body.ok} ${childDelete.body.result}`, 'true false', 'X: deleting an unlocked child of a locked frame answers ok:true and the child is gone');
+
+    // Lock refusals are grouped by method and lock, at most five ids to a group's line and ten lines to
+    // an answer, so a bulk write across a locked frame answers in a few hundred characters, not one line a shape.
+    const lockBig = await execBlob(port, `editor.updateShapes([{ id: 'shape:xbig', type: 'frame', isLocked: true }]); return editor.getShape('shape:xbig').isLocked`);
+    eq(`${lockBig.body.ok} ${lockBig.body.result}`, 'true true', 'X: the frame holding 2,500 shapes is locked (ok:true)');
+    const bulk = await execBlob(port, `const ps = []; for (let i = 0; i < 300; i++) ps.push({ id: createShapeId('xk' + i), type: 'geo', x: 1 }); editor.updateShapes(ps); return 'restyled'`);
+    const bulkLine = 'updateShapes: 300 shapes not changed, because shape:xbig holding them is locked (shape:xk0, shape:xk1, shape:xk2, shape:xk3, shape:xk4, and 295 more); ' +
+      'do not redo them: if the Send needs them changed, ask the operator to unlock shape:xbig';
+    const bulkError = bulk.body.error ?? '';
+    ok(bulk.body.ok === false && bulkError.startsWith(`Error: ${bulkLine}; this blob may have drawn`) && !bulkError.includes('\n') && bulkError.length < 1000,
+      `INVARIANT: X: an update of 300 shapes a locked frame holds answers one grouped line naming the count, five ids and the rest, the frame to unlock, and the tail (${bulkError.length} chars: ${bulkError.slice(0, 300)})`);
+    const loop = await execBlob(port, `for (const k of ['x1', 'x2', 'x7', 'x8', 'x9']) for (let r = 0; r < 20; r++) editor.updateShape({ id: createShapeId(k), type: 'geo', x: 5000 + r }); return 'looped'`);
+    const loopLine = 'updateShapes: 5 shapes not changed, because they are locked (shape:x1, shape:x2, shape:x7, shape:x8, shape:x9); do not redo them: if the Send needs them changed, ask the operator to unlock them';
+    const loopError = loop.body.error ?? '';
+    ok(loop.body.ok === false && loopError.startsWith(`Error: ${loopLine}; this blob may have drawn`) && !loopError.includes('\n'),
+      `INVARIANT: X: updateShape called 100 times in a loop on 5 locked shapes answers one grouped line, not one a call (${loopError.slice(0, 300)})`);
+
+    // Twelve locked frames, each holding one shape: twelve groups, each with a lock of its own.
+    const manyFrames = await execBlob(port, `
+      const ks = Array.from({ length: 12 }, (_, k) => k)
+      editor.createShapes(ks.map((k) => ({ id: 'shape:xmf' + k, type: 'frame', x: -3000 + k * 250, y: 2000, props: { w: 200, h: 200, name: 'M' + k } })))
+      editor.createShapes(ks.map((k) => ({ id: 'shape:xmc' + k, type: 'geo', parentId: 'shape:xmf' + k, x: 20, y: 20, props: { w: 50, h: 50 } })))
+      editor.updateShapes(ks.map((k) => ({ id: 'shape:xmf' + k, type: 'frame', isLocked: true })))
+      return ks.every((k) => editor.getShape('shape:xmf' + k).isLocked && editor.getShape('shape:xmc' + k).parentId === 'shape:xmf' + k)`);
+    eq(`${manyFrames.body.ok} ${manyFrames.body.result}`, 'true true', 'X: twelve locked frames each hold one shape (ok:true)');
+    const heldLine = (k: number): string =>
+      `updateShapes: shape:xmc${k} not changed, because shape:xmf${k} holding it is locked; do not redo it: if the Send needs it changed, ask the operator to unlock shape:xmf${k}`;
+    const twelve = await execBlob(port, `for (let k = 0; k < 12; k++) editor.updateShapes([{ id: 'shape:xmc' + k, type: 'geo', x: 30 }]); return { ran: 'to its end' }`);
+    const twelveLines = (twelve.body.error ?? '').split('\n');
+    deepEq([twelve.body.ok, ...twelveLines.slice(0, 11)], [false, `Error: ${heldLine(0)}`, ...Array.from({ length: 9 }, (_, k) => heldLine(k + 1)), 'and 2 more refusals'],
+      'INVARIANT: X: a blob refused under twelve different locks answers ten lines, one a lock, then "and 2 more refusals"');
+    ok(twelveLines.length === 12 && /^this blob may have drawn: read \/shapes/.test(twelveLines[11] ?? ''),
+      `INVARIANT: X: a multi-line refusal's "this blob may have drawn" tail sits on its own last line (${twelveLines.length} lines, last: ${(twelveLines[11] ?? '').slice(0, 60)})`);
+    deepEq(twelve.body.result, { ran: 'to its end' }, 'INVARIANT: X: a refused exec whose blob ran to its end still carries what the blob returned');
+    const eleven = await execBlob(port, `for (let k = 0; k < 11; k++) editor.updateShapes([{ id: 'shape:xmc' + k, type: 'geo', x: 30 }]); return 11`);
+    eq((eleven.body.error ?? '').split('\n')[10], 'and 1 more refusal', 'X: eleven refused locks answer ten lines, then "and 1 more refusal"');
+
+    // [store flag: _isInAtomicOp] The blob's own createBindings is not a wrapped write, but the binding's
+    // after-create side effect (ArrowBindingUtil: reparentArrow) makes a wrapped updateShapes at depth 0,
+    // raising an arrow in a locked frame above the box it now points at. That call runs inside the store's
+    // atomic op, so the guard passes it to tldraw, which skips the locked arrow in silence.
+    const BF = 'shape:xbf';
+    const arrowTo = (k: number): string => `{ type: 'arrow', fromId: 'shape:xba${k}', toId: 'shape:xbb${k}', props: { terminal: 'end', normalizedAnchor: { x: 0.5, y: 0.5 }, isExact: false, isPrecise: false, snap: 'none' } }`;
+    const bindFrame = await execBlob(port, `
+      editor.createShapes([{ id: '${BF}', type: 'frame', x: -3000, y: 2400, props: { w: 1600, h: 800, name: 'Bind' } }])
+      editor.createShapes([1, 2].flatMap((k) => [
+        { id: 'shape:xba' + k, type: 'arrow', parentId: '${BF}', x: 100, y: k * 300, props: { start: { x: 0, y: 0 }, end: { x: 200, y: 50 } } },
+        { id: 'shape:xbb' + k, type: 'geo', parentId: '${BF}', x: 620, y: k * 300 - 40, props: { w: 100, h: 80 } },
+      ]))
+      editor.createBindings([${arrowTo(2)}])
+      editor.updateShapes([{ id: '${BF}', type: 'frame', isLocked: true }])
+      const s = (id) => editor.getShape(id)
+      return { locked: s('${BF}').isLocked, below: s('shape:xba1').index < s('shape:xbb1').index, bound2: editor.getBindingsFromShape('shape:xba2', 'arrow').length }`);
+    deepEq({ ok: bindFrame.body.ok, ...(bindFrame.body.result as object) }, { ok: true, locked: true, below: true, bound2: 1 },
+      'X: a locked frame holds an unbound arrow below a box, and an arrow bound to a second box (ok:true)');
+    mark = server._log.length;
+    const bindLocked = await execBlob(port, `
+      const before = editor.getShape('shape:xba1').index
+      editor.createBindings([${arrowTo(1)}])
+      return { bound: editor.getBindingsFromShape('shape:xba1', 'arrow').length, indexKept: editor.getShape('shape:xba1').index === before }`);
+    deepEq({ ok: bindLocked.body.ok, error: bindLocked.body.error ?? null, ...(bindLocked.body.result as object) }, { ok: true, error: null, bound: 1, indexKept: true },
+      'INVARIANT: X: [_isInAtomicOp] binding an arrow in a locked frame to a box answers ok:true, though tldraw\'s side effect tries to reorder the locked arrow');
+    ok(await canvasUp(port) && quiet(mark).length === 0, `X: that binding leaves the canvas up with no recovery (${quiet(mark).join(' | ')})`);
+
+    // The operator makes the same changes from a tab of their own: they reach the canvas as a remote merge.
+    const steady = async (since: number): Promise<{ up: boolean; lines: string[] }> => {
+      let up = true;
+      for (let i = 0; i < 10; i++) { if (!(await canvasUp(port))) up = false; await sleep(200); }
+      return { up, lines: quiet(since) };
+    };
+    mark = server._log.length;
+    peer.remove('shape:xlb2');
+    ok(await waitFor(async () => !(await listShapes(port)).some((s) => s.id === 'shape:xlb2'), 5000, 250), 'INVARIANT: X: /shapes drops the box the operator deleted');
+    let st = await steady(mark);
+    ok(st.up && st.lines.length === 0, `INVARIANT: X: the render-canvas stays connected through the operator's delete (${st.lines.join(' | ')})`);
+    eq(JSON.stringify(await execLands(port, board, 'shape:xfollow1')), JSON.stringify({ status: 200, reached: true }), 'INVARIANT: X: an /exec after the operator\'s delete lands in the room');
+
+    const top = await execRead<string>(port, `return editor.getHighestIndexForParent('${F}')`);
+    mark = server._log.length;
+    peer.patch('shape:xlb3', { index: top });
+    ok(await waitFor(async () => (await listShapes(port)).find((s) => s.id === 'shape:xlb3')?.index === top, 5000, 250), `INVARIANT: X: /shapes shows the box the operator reordered at its new index (${top})`);
+    st = await steady(mark);
+    ok(st.up && st.lines.length === 0, `INVARIANT: X: the render-canvas stays connected through the operator's reorder (${st.lines.join(' | ')})`);
+    eq(JSON.stringify(await execLands(port, board, 'shape:xfollow2')), JSON.stringify({ status: 200, reached: true }), 'INVARIANT: X: an /exec after the operator\'s reorder lands in the room');
+
+    // The operator's changes merged while an exec runs: a blob awaits 3 s, and the peer's write reaches the
+    // canvas during that wait, so the guard is armed. What the blob read before and after its wait shows the
+    // merge landed inside it.
+    const duringWait = async (probe: string, write: () => void): Promise<ApiResponse> => {
+      const pending = execBlob(port, `const before = ${probe}; await new Promise((r) => setTimeout(r, 3000)); return { before, after: ${probe} }`);
+      await sleep(800);
+      write();
+      return pending;
+    };
+    // [store flag: _isInAtomicOp, after a merge] The operator raises the bound box above its arrow. tldraw's
+    // after-change side effect then reorders the locked arrow with a wrapped updateShapes at depth 0, run once
+    // the merge's own writes are done: Store has cleared isMergingRemoteChanges by then, so only the atomic-op
+    // flag tells it from the blob's own write.
+    const topB = await execRead<string>(port, `return editor.getHighestIndexForParent('${BF}')`);
+    mark = server._log.length;
+    const reorderDuring = await duringWait(`editor.getShape('shape:xbb1').index`, () => peer?.patch('shape:xbb1', { index: topB }));
+    const reordered = (reorderDuring.body.result ?? {}) as { before?: string; after?: string };
+    deepEq({ ok: reorderDuring.body.ok, error: reorderDuring.body.error ?? null }, { ok: true, error: null },
+      'INVARIANT: X: [_isInAtomicOp] the operator reordering a box bound to an arrow in a locked frame while a blob awaits leaves that exec ok:true');
+    ok(typeof reordered.before === 'string' && reordered.before !== topB && reordered.after === topB,
+      `X: that reorder merged during the blob's wait, not before it (${JSON.stringify(reordered)}, top ${topB})`);
+    st = await steady(mark);
+    ok(st.up && st.lines.length === 0, `INVARIANT: X: the render-canvas stays connected through that reorder (${st.lines.join(' | ')})`);
+    // [store flags: isMergingRemoteChanges or _isInAtomicOp, in the merge] The operator deletes the bound box.
+    // tldraw's before-delete side effect moves the locked arrow's terminal with a wrapped updateShape at depth
+    // 0, inside the merge itself, where both flags are set: Store.atomic sets isMergingRemoteChanges only
+    // inside an atomic op, so this case fails only with both conditions gone, and none fails with
+    // isMergingRemoteChanges alone removed.
+    mark = server._log.length;
+    const deleteDuring = await duringWait(`!!editor.getShape('shape:xbb2')`, () => peer?.remove('shape:xbb2'));
+    deepEq({ ok: deleteDuring.body.ok, error: deleteDuring.body.error ?? null, ...(deleteDuring.body.result as object) }, { ok: true, error: null, before: true, after: false },
+      'INVARIANT: X: [in the merge] the operator deleting a box bound to an arrow in a locked frame while a blob awaits leaves that exec ok:true, and the delete merged during the wait');
+    st = await steady(mark);
+    ok(st.up && st.lines.length === 0, `INVARIANT: X: the render-canvas stays connected through that delete (${st.lines.join(' | ')})`);
+  } finally {
+    peer?.close();
+    await stopCanvasServer(server, seen);
+    removeBoard(board);
+  }
+}
+
 async function main() {
   await phaseA();
   await phaseB();
   // Phases C onward run a real render-canvas: Playwright's Chromium and the built app. CI has neither.
   if (!hasChromium() || !hasAppBuild()) {
-    console.log('\n[SKIP] Phases C-W: they need Playwright\'s Chromium and the built app (scripts/whiteboard.sh install)');
+    console.log('\n[SKIP] Phases C-X: they need Playwright\'s Chromium and the built app (scripts/whiteboard.sh install)');
     console.log(`\n${passed} passed, ${failures.length} failed`);
     if (failures.length) { for (const f of failures) console.log(`  FAILED: ${f}`); process.exit(1); }
     process.exit(0);
@@ -1555,6 +1922,7 @@ async function main() {
   await phaseU();
   await phaseV();
   await phaseW();
+  await phaseX();
   console.log(`\n${passed} passed, ${failures.length} failed`);
   if (failures.length) { for (const f of failures) console.log(`  FAILED: ${f}`); process.exit(1); }
   process.exit(0);

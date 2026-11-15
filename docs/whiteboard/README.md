@@ -1,13 +1,14 @@
 # Whiteboard design notes
 
-Maintainer material for the incubating `whiteboard` skill
-(`skills/_incubating/whiteboard/`). None of it ships with the skill, and an agent
+Maintainer material for the `whiteboard` skill
+(`skills/visual/whiteboard/`). None of it ships with the skill, and an agent
 running a board never needs it.
 
 The skill is ported from the Aclarify Workspace's own whiteboard skill and tracks
-its upstream commit `4274c79c` (spec v9.11, the doorbell redesign). The spec's
-§9 "Port decisions" records every place this port departs from upstream: where
-boards live, how the runtime is installed, the detached boot and pull delivery
+its upstream commit `5e8a16c1` (spec v9.13: one boards folder from every checkout,
+and a board's name backed by one file). The spec's §9 "Port decisions" records
+every place this port departs from upstream: where boards live, how the runtime is
+installed, the detached boot and pull delivery
 for harnesses other than Claude Code, and the hardening re-applied on top.
 
 - `SPEC.md`: the design spec and its decision log. The skill's code comments cite

@@ -192,7 +192,7 @@ when a task matches.
 | [Engineering](#engineering) | Finding the cause, building test-first, committing cleanly and taking a pull request to green |
 | [Writing](#writing) | Gathering the material, drafting the argument or the ask, then checking it |
 | [Strategy](#strategy) | Testing demand, ranking options, reviewing a plan and gating a launch |
-| [Visual](#visual) | Product interfaces, the brand kit and slide decks |
+| [Visual](#visual) | Product interfaces, the brand kit, slide decks and a live whiteboard |
 | [Harness](#harness) | Building, measuring and maintaining the skills and conventions your agents read |
 | [Incubating](#incubating) | Public beta skills, installed only by name |
 
@@ -271,6 +271,12 @@ when a task matches.
 | [`get-brand-kit`](skills/visual/get-brand-kit) | Look up colours, type, logos and voice in your brand kit (ships a placeholder) |
 | [`design-expert`](skills/visual/design-expert) | Audit, redesign and polish a product interface on your brand kit and design system |
 | [`create-html-slides`](skills/visual/create-html-slides) | Build a branded 16:9 slide deck as one self-contained HTML file, with optional PDF |
+| [`whiteboard`](skills/visual/whiteboard) | Draw on a live tldraw board with your agents, in your browser |
+
+`whiteboard` needs Node.js 22.12 or newer. On first use it installs tldraw, Vite
+and Playwright's Chromium (about 150 MB), after asking. tldraw is under
+[its own licence](https://github.com/tldraw/tldraw/blob/main/LICENSE.md), which
+allows use in a local development environment.
 
 <sub>[Back to catalog](#catalog)</sub>
 
@@ -295,14 +301,7 @@ when a task matches.
 > list them. Install one by name:
 > `npx skills add spencermarx/skills#stable --skill <name>`.
 
-| Skill | Use it to |
-|:---|:---|
-| [`whiteboard`](skills/_incubating/whiteboard) | Draw on a live tldraw board with your agents, in your browser |
-
-`whiteboard` needs Node.js 22.12 or newer. On first use it installs tldraw, Vite
-and Playwright's Chromium (about 150 MB), after asking. tldraw is under
-[its own licence](https://github.com/tldraw/tldraw/blob/main/LICENSE.md), which
-allows use in a local development environment.
+No skill is incubating right now.
 
 <sub>[Back to catalog](#catalog)</sub>
 

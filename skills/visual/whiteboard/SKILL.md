@@ -4,9 +4,6 @@ description: "Stand up a live, shared tldraw whiteboard the user and agent sessi
 argument-hint: "[new <name> | open <name-or-path>]"
 license: MIT
 compatibility: "Needs Node.js 22.12+, npm, curl and a browser. On first use it installs tldraw, Vite and Playwright with its Chromium (about 150 MB), after asking. In Claude Code the board rings the session when the user Sends; elsewhere the lead waits for Sends with a foreground long-poll at the end of each turn."
-metadata:
-  status: "incubating"
-  internal: true
 ---
 
 # Whiteboard
@@ -32,12 +29,14 @@ This repository's agent configuration should have been provided to you (the `## 
 block pointing at `docs/agents/`). Read the scratch folder from `docs/agents/workspace.md`. If it
 is missing, use `.scratchpad/` and suggest the user run the `setup-aclarify-skills` skill.
 
-The **boards folder** is `<scratch folder>/whiteboard/`. New boards are created there as
-`<name>.tldr`; a board can also be any `.tldr` file inside the repository. A board's room id is
-its file name without `.tldr`. Its other files always live in the boards folder, named by that
-room id: `.lock` while served, `.port` (a reopen reuses it, so the tab reconnects),
-`.messages.jsonl` (the chat), `.recipients.json` (worker keys), `.png` (renders) and `.log` (a
-detached server's output). The scratch folder is git-ignored, so list it directly; a recursive
+The **boards folder** is `<scratch folder>/whiteboard/` in the main checkout, even when you work
+in a linked worktree, so every checkout shares one boards folder and one lock per board name;
+`scripts/whiteboard.sh` finds it. New boards are created there as `<name>.tldr`; a board can also
+be any `.tldr` file inside the repository. A board's room id is its file name without `.tldr`.
+Its other files always live in the boards folder, named by that room id: `.lock` while served,
+`.port` (a reopen reuses its port, so the tab reconnects; closing the board keeps it, without
+the port), `.messages.jsonl` (the chat), `.recipients.json` (worker keys), `.png` (renders) and
+`.log` (a detached server's output). The scratch folder is git-ignored, so list it directly; a recursive
 search that obeys `.gitignore` skips it.
 
 ## 0. The runtime
@@ -65,9 +64,12 @@ fresh install. When this skill's folder is read-only (a plugin cache), the runti
 **1. Resolve.** Every command below names the board one of two ways: `--name "<name>"` for a
 board in the boards folder ("Sales Engine Design" is `Sales-Engine-Design.tldr`, by the same rule
 the panel's "new board" uses), or `--board "<path>"` for a `.tldr` file in the repository (a
-path is anything with a `/` or ending in `.tldr`). `open <name-or-path>` needs the file to exist
-and never creates it; `new <name>` errors if it exists; no argument takes the most recently
-modified `.tldr` in the boards folder, else `new` on a default name.
+path is anything with a `/` or ending in `.tldr`). `--name` follows the name's `.port` when it
+records the board's file elsewhere (a board moved onto a tracked copy keeps its name). `open
+<name-or-path>` needs the file to exist and never creates it; `new <name>` errors if it exists;
+no argument opens, by `--name`, the board whose `.port` in the boards folder was written last, as
+`open` does, except that its `<name>.tldr` in the boards folder is created if missing; else `new`
+on a default name.
 
 **2. Locate: attach or boot.**
 
@@ -75,11 +77,20 @@ modified `.tldr` in the boards folder, else `new` on a default name.
 bash scripts/whiteboard.sh locate --name "<name>" --repo . --scratch <scratch folder>   # or --board "<path>"
 ```
 
-It prints `{ board, name, room, lock, port, messages, recipients, png, log, live }`; read every
-field by name. `live` is the lock of a server that is serving this board now (its pid and its
-`parentPid` alive, and its port answering for this room), else `null`. Exit 2 means the path is
-not a `.tldr` inside the repository or the boards folder, or its folder does not exist: say so and
-stop.
+It prints `{ board, name, room, lock, port, messages, recipients, png, log, live, otherFile,
+outsideCheckout }`; read every field by name. `live` is the lock of a server that is serving this board's name now
+(its pid and its `parentPid` alive, and its port answering for this room), else `null`. Exit 2
+means the path is not a `.tldr` inside the repository or the boards folder, or its folder does
+not exist: say so and stop. An exit 2 whose line says `which no longer exists` is a name whose
+recorded file is gone: follow `references/boot-failures.md` § The name's recorded file no longer
+exists. One that says `outside this checkout` is a name whose recorded file is in another checkout:
+follow § The name's recorded file is outside this checkout there.
+
+- **`otherFile` is `true`:** a live server holds another `.tldr` under this board's name. Neither
+  attach nor boot: do what `references/boot-failures.md` § Exit 3 says.
+- **`outsideCheckout` is `true`:** the board's file lies outside this checkout, and a live server
+  holds exactly that file. Attach as below, but never boot it from here: once it is down, it boots
+  only from a checkout that holds its file.
 
 - **`live` is `null`:** boot (step 3). The new server replaces a stale lock.
 - **`live` is yours:** skip to step 5 with `live.port`. It is yours in owned mode when
@@ -177,7 +188,8 @@ On a Send the panel shows **not heard**, or a late ring, read `references/delive
 
 **(b) Perceive**, with `?sessionId=<sid>`: `GET /shapes` for ids, then `GET /image` →
 `{ path, bounds }`. **Open and view the PNG at `path`**, bird's-eye first, then
-`&bounds=x,y,w,h` (page coordinates from `/shapes`) to zoom. `503` `no image produced` is an empty
+`&bounds=x,y,w,h` (page coordinates from `/shapes`) to zoom; a picture captioned `Overview:`
+shows none of the shapes' text, so zoom closer to read it. `503` `no image produced` is an empty
 board; **on any other `503`, read `references/exec-failures.md` before you retry.** "This" and
 "these" come from `selection`.
 
