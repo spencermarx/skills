@@ -357,9 +357,10 @@ if (isMain()) {
   const live = await liveOwner(home, room);
   // [#71] A live server holding this name for another file is not this board's server: never attach.
   const otherFile = !!live && !isBoardFile(live.boardPath, board);
-  // [port] A board outside the repository is refused, unless a live server holds exactly that file:
-  // attaching to it reads and writes nothing in this checkout. Nothing boots it from here.
-  if (!resolved.ok && (!live || otherFile)) {
+  // [port] A board outside the repository is refused, unless a live server holds exactly that file,
+  // which its lock must name (a lock with no boardPath could be serving another file): attaching to
+  // it reads and writes nothing in this checkout. Nothing boots it from here.
+  if (!resolved.ok && (!live || otherFile || typeof live.boardPath !== 'string')) {
     console.error(`boards.mjs: ${resolved.error}`);
     process.exit(2);
   }

@@ -14,7 +14,8 @@
 //      1 at boot and answer 422 on a switch, leaving the file byte-identical.
 //   7. A switch whose outgoing board cannot be saved is refused (503): the server stays on it, keeps
 //      its lock, takes no lock on the target, and says in the panel that saving failed. So is a
-//      switch onto another file of the hosted board's name: the board stays on the file left.
+//      switch onto another file of the hosted board's name: the board stays on the file left, and
+//      so it does when the save check passes but the final flush fails, saved once the file can be.
 //   8. Naming: /board/new uses the one slug rule, refuses a name recorded outside the repository
 //      (403), and takes its room from the file a symlinked name leads to; an agent without a name is
 //      "Agent", and boards.mjs locates a board in WHITEBOARD_HOME (exit 3 live, 0 free, 2 refused).
@@ -256,6 +257,39 @@ async function unsavedRefile() {
   }
 }
 
+async function failedRefileFlush() {
+  console.log('\n[7c] a same-name switch whose final flush fails stays on the file left');
+  const board = path.join(SB.root, 'flushfail', 'flushfail.tldr');
+  writeValidBoard(board);
+  const target = path.join(SB.root, 'docs', 'flushfail.tldr');
+  writeValidBoard(target);
+  const server = startServer(SB, board);
+  const port = await server.port;
+  const room = SB.room(board);
+  // The folder stays writable, so the save check's temp file is written; the board's file is now a
+  // folder, so the final flush's rename onto it fails.
+  fs.rmSync(board);
+  fs.mkdirSync(board);
+  try {
+    const sw = await postJson(port, '/board/open', { path: target });
+    eq(sw.status, 503, `the switch is refused once the final flush fails (503: ${sw.body?.error})`);
+    const status = await json(port, '/canvas-status');
+    eq(status.activeRoom, room, 'the server keeps the name');
+    eq(status.boardPath, board, 'on the file left');
+    eq(JSON.parse(fs.readFileSync(SB.files(board).lock, 'utf8')).boardPath, board, 'and its lock still names that file');
+    fs.rmdirSync(board);
+    let saved = false;
+    for (let i = 0; i < 20 && !saved; i++) {
+      await sleep(250);
+      saved = fs.existsSync(board) && fs.statSync(board).isFile();
+    }
+    ok(saved, 'the kept room is saved to the file left once it can be');
+  } finally {
+    if (fs.existsSync(board) && fs.statSync(board).isDirectory()) fs.rmdirSync(board);
+    await stopServer(server);
+  }
+}
+
 async function naming(port) {
   console.log('\n[8] naming');
   await postJson(port, '/agent-message', { text: 'hello from nobody' });
@@ -322,6 +356,7 @@ async function main() {
   await boardsCli(port, boardPath);
   await unsavedSwitch();
   await unsavedRefile();
+  await failedRefileFlush();
   await naming(port);
 }
 

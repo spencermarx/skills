@@ -367,6 +367,16 @@ test("locate: a name recorded outside this checkout is refused, unless a live se
   } finally {
     await other.close();
   }
+
+  // A lock that names no file (a server from before #71) may be serving any file of the name.
+  const unstamped = await liveStandIn(sk, "plan", undefined);
+  try {
+    const live = await boardsCli(sk, "--name", "plan");
+    assert.equal(live.status, 2, `a live lock naming no file does not lift the refusal: ${live.stdout}${live.stderr}`);
+    assert.ok(live.stderr.includes(refusal), live.stderr);
+  } finally {
+    await unstamped.close();
+  }
 });
 
 test("locate: a live server holding the name for another file is never attached to", async () => {
