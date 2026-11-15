@@ -34,7 +34,7 @@ import { chromium, type Browser, type Page } from 'playwright';
 import { PresenceManager, type PresenceState } from './presence.js';
 import { postToInbox } from './inbox.js';
 import { isCanvasDriverFault } from './canvas-fault.js';
-import { boardFileForName, canonicalBoardPath, isRoomId, placementRefusal, slugFor } from './boards.mjs';
+import { canonicalBoardPath, isBoardFile, isRoomId, otherFileRefusal, placementRefusal, resolveBoard, slugFor } from './boards.mjs';
 import { findRepoRoot, scratchpadHome } from './scratchpad-home.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -209,34 +209,22 @@ if (BOARD_ENV !== undefined && !(path.isAbsolute(BOARD_ENV) && BOARD_ENV.endsWit
 // path entering the server is put in this form once, where it enters (the boot, /board/open,
 // /board/new), and every stamp read back from disk is compared in it (isBoardFile).
 
-// The file the boot was asked to serve; unset, the default name's (boards.mjs's boardFileForName,
-// #72 clause 6). A default name whose recorded file is gone refuses the boot before anything is
-// bound or written, so its port record is left as it is; [port] like every refusal of a board, with
-// exit 2. Once the boot creates its room, the room's `boardPath` is the one record of the hosted
-// board's file (activeBoardPath), and this is read only before then.
+// The file the boot was asked to serve; unset, the default name's (boardFileForName, #72 clause 6),
+// placed as every board is (boards.mjs's resolveBoard). A refused board, a default name whose
+// recorded file is gone included, refuses the boot before anything is bound or written, so its port
+// record is left as it is; [port] every refusal of a board exits 2. scripts/whiteboard.sh always
+// sets WHITEBOARD_BOARD, so the default name is reached only by a bare `node index.ts` and the suites.
+// Once the boot creates its room, the room's `boardPath` is the one record of the hosted board's
+// file (activeBoardPath), and this is read only before then.
 function bootBoardPath(): string {
-  if (BOARD_ENV) return canonicalBoardPath(BOARD_ENV);
-  const resolved = boardFileForName(HOME, 'board');
+  const resolved = resolveBoard(BOARD_ENV ? { board: BOARD_ENV } : { name: 'board' }, REPO_ROOT, HOME);
   if (resolved.ok) return resolved.boardPath;
   console.error(`[bridge] ${resolved.error}`);
   process.exit(2);
 }
 const BOOT_BOARD_PATH = bootBoardPath();
-const BOARD_REFUSAL = placementRefusal(BOOT_BOARD_PATH, REPO_ROOT, HOME);
-if (BOARD_REFUSAL) {
-  console.error(`[bridge] WHITEBOARD_BOARD refused: ${BOARD_REFUSAL}`);
-  process.exit(2);
-}
 let activeRoomId = boardName(BOOT_BOARD_PATH);
 let latestImagePath = imagePathFor(BOOT_BOARD_PATH);
-
-// [#72] Whether something stamped with `stamp` (a lock, the port record, a chat entry, a recipient)
-// belongs to the board whose file is `boardPath`: the stamp names that file, compared in canonical
-// form, or there is no stamp, as from a server older than #71 or #72, and then it counts as the
-// board's.
-function isBoardFile(stamp: unknown, boardPath: string): boolean {
-  return typeof stamp !== 'string' || canonicalBoardPath(stamp) === canonicalBoardPath(boardPath);
-}
 
 // [#64] Whether this process hosts `room`: the active board, and no other. The one test used by the
 // sync upgrade, POST /message and POST /request-teardown. A board this process still holds while an
@@ -549,9 +537,6 @@ function claimLockNow(roomId: string, stalePid: number | undefined, boardPath: s
 function otherFile(owner: LockOwner, boardPath: string): boolean {
   return !isBoardFile(owner.boardPath, boardPath);
 }
-function otherFileRefusal(roomId: string, owner: LockOwner, boardPath: string): string {
-  return `board '${roomId}' is open from another file: ${owner.boardPath} (pid ${owner.pid}, port ${owner.port}); not serving ${canonicalBoardPath(boardPath)}. Close it there, or open that file.`;
-}
 
 // ===========================================================================
 // SYNC SERVER — one TLSocketRoom per board (SPEC §3, §8)
@@ -623,7 +608,11 @@ function getOrCreateRoom(roomId: string): RoomEntry {
 function openRoom(roomId: string, boardPath: string, fenceAbove?: number): RoomEntry {
   let initialSnapshot = readBoardSnapshot(boardPath);
   if (fenceAbove !== undefined) initialSnapshot = fencedSnapshot(initialSnapshot, fenceAbove);
+  return roomEntry(roomId, boardPath, initialSnapshot);
+}
 
+// The room for `boardPath`, holding `initialSnapshot` (an empty board when there is none).
+function roomEntry(roomId: string, boardPath: string, initialSnapshot: unknown): RoomEntry {
   const entry: RoomEntry = { room: null as unknown as TLSocketRoom, boardPath, dirty: false, saving: null };
   try {
     entry.room = new TLSocketRoom({
@@ -757,16 +746,18 @@ function canSave(roomId: string, entry: RoomEntry): boolean {
 }
 
 // [port] A board that cannot be saved is said in the panel once per run of failures, not only in the
-// log, so the operator can export it before the edits since the last save are lost.
+// log, so the operator can export it before the edits since the last save are lost. Keyed by the
+// board's file, since a same-name switch keeps the room id: a run of failures on the file left must
+// not silence the first on the file switched to.
 const persistFailing = new Set<string>();
 function notePersistResult(roomId: string, entry: RoomEntry, error: Error | null): void {
   if (!error) {
-    if (persistFailing.delete(roomId)) postSystemMessage(`Saving the board works again: ${entry.boardPath}`);
+    if (persistFailing.delete(entry.boardPath)) postSystemMessage(`Saving the board works again: ${entry.boardPath}`);
     return;
   }
   console.warn(`[sync] persist failed for '${roomId}': ${error.message}`);
-  if (persistFailing.has(roomId) || shuttingDown) return;
-  persistFailing.add(roomId);
+  if (persistFailing.has(entry.boardPath) || shuttingDown) return;
+  persistFailing.add(entry.boardPath);
   postSystemMessage(`The board cannot be saved to ${entry.boardPath} (${error.message}). Export it from the menu until this is fixed; edits since the last save exist only in the open board.`);
 }
 
@@ -3405,7 +3396,10 @@ type SwitchOutcome =
 // The last render-canvas navigation's failure, or null once a navigation or a relaunch succeeds.
 let lastNavError: string | null = null;
 
-function switchRoom(roomId: string, boardPath: string): Promise<SwitchOutcome> {
+// [port] The room id is the file's (boardName), never one a caller names, so a board reached through a
+// symlinked `<name>.tldr` is one room with the one lock `locate` checks.
+function switchRoom(boardPath: string): Promise<SwitchOutcome> {
+  const roomId = boardName(boardPath);
   return new Promise<SwitchOutcome>((answer) => {
     runExclusive(async () => {
       // 1. Prepare. [#65] A server from before #64 may hold the board it left in memory with no lock,
@@ -3492,7 +3486,7 @@ function rebuildCursors(roomId: string): void {
 //   in flight lands; the final snapshot is flushed to the file left. The room stays registered,
 //   closed, until the new one replaces it (a sync peer that reconnects meanwhile is refused and
 //   retries), so an exit meanwhile still flushes it, and the lock is never removed, so no other
-//   server can take the name.
+//   server can take the name. [port] A final flush that fails is a 503 with nothing switched.
 //   Then load the target from disk, after the flush, behind the sync-clock fence (fencedSnapshot),
 //   so every tab that was on the file left is reset to the target when it reconnects. A file that
 //   will not load is a 422, and the file left is loaded again, unchanged on disk.
@@ -3514,7 +3508,17 @@ async function refileRoom(roomId: string, boardPath: string, answer: (o: SwitchO
   beginSwitch();
   prev.room.close();
   if (prev.saving) await prev.saving;
-  persistRoomSync(roomId, prev);
+  // [port] The probe passed, but the final flush can still fail. Nothing is committed yet, so the
+  // board stays on the file left: reopened from the closed room's snapshot, which holds every edit
+  // the flush did not write.
+  if (!persistRoomSync(roomId, prev)) {
+    const kept = roomEntry(roomId, prev.boardPath, prev.room.getCurrentSnapshot());
+    kept.dirty = true; // its file still lacks these edits: saved on the next tick
+    rooms.set(roomId, kept);
+    rebuildCursors(roomId);
+    answer({ kind: 'unsaved', error: unsavedRefusal(roomId) });
+    return false;
+  }
   let next: RoomEntry;
   try {
     next = openRoom(roomId, boardPath, leftClock);
@@ -3618,7 +3622,8 @@ async function evictRoom(roomId: string): Promise<void> {
 // The switch's outcome as the panel acts on it. 200 means the server is on the board the answer
 // names (`attach: false`), or names another server's port to attach to (`attach: true`); a 409 or
 // 422 means nothing changed and the panel stays on its board.
-function answerSwitch(res: Response, verb: 'open' | 'new', roomId: string, boardPath: string, outcome: SwitchOutcome): void {
+function answerSwitch(res: Response, verb: 'open' | 'new', boardPath: string, outcome: SwitchOutcome): void {
+  const roomId = boardName(boardPath);
   switch (outcome.kind) {
     case 'attach':
       console.log(`[bridge] board ${verb} -> '${roomId}' already live at port ${outcome.owner.port} (pid ${outcome.owner.pid}); attach, do not steal`);
@@ -3678,7 +3683,6 @@ app.post('/board/open', async (req: Request, res: Response) => {
     return;
   }
   const boardPath = placed.path;
-  const roomId = boardName(boardPath);
   // [v8 §8.3] One server per board. If a live foreign process already hosts this board, DO NOT
   // switch in-process (that would steal its lock -> split-brain). Hand the client that process's
   // port so it attaches there instead. [#64] A process still releasing it, or not answering, after
@@ -3686,7 +3690,7 @@ app.post('/board/open', async (req: Request, res: Response) => {
   // [#65] So is a server from before #64 running on any board.
   // Unowned / stale-locked / our-own-board => switch in-process. switchRoom makes that check, where
   // it writes the lock.
-  answerSwitch(res, 'open', roomId, boardPath, await switchRoom(roomId, boardPath));
+  answerSwitch(res, 'open', boardPath, await switchRoom(boardPath));
 });
 
 app.post('/board/new', async (req: Request, res: Response) => {
@@ -3696,24 +3700,20 @@ app.post('/board/new', async (req: Request, res: Response) => {
     return;
   }
   const safe = slugFor(name); // [port] the one name rule, shared with scripts/whiteboard.sh --name
-  // [#72 clause 6] A bare name opens the file boardFileForName resolves it to. A refused name is a
-  // 409 with nothing switched and the record untouched. [port] A recorded file must still pass the
-  // placement rule, as any path a request names.
-  const resolved = boardFileForName(HOME, safe);
+  // [#72 clause 6] A bare name opens the file boardFileForName resolves it to (resolveBoard). A name
+  // whose recorded file is gone is a 409 with nothing switched and the record untouched. [port] A
+  // recorded file must still pass the placement rule, as any path a request names: 403 outside the
+  // repository, 400 otherwise.
+  const resolved = resolveBoard({ name: safe }, REPO_ROOT, HOME);
   if (!resolved.ok) {
     console.warn(`[bridge] ${resolved.error}`);
-    res.status(409).json({ error: resolved.error });
+    res.status(resolved.kind === 'gone' ? 409 : resolved.kind === 'outside' ? 403 : 400).json({ error: resolved.error });
     return;
   }
-  const placed = boardFromRequest(resolved.boardPath);
-  if (!placed.ok) {
-    res.status(placed.status).json({ error: placed.error });
-    return;
-  }
-  const boardPath = placed.path;
+  const boardPath = resolved.boardPath;
   // [v8 §8.3] Same one-server guard as /board/open: a "new" board whose name collides with a
-  // live board must attach to that owner, never steal its lock.
-  answerSwitch(res, 'new', safe, boardPath, await switchRoom(safe, boardPath));
+  // live board must attach to that owner, never steal its lock. Its room is the file's (switchRoom).
+  answerSwitch(res, 'new', boardPath, await switchRoom(boardPath));
 });
 
 // `room` is the board's sync room id as this server names it (boardName), so the switcher joins the

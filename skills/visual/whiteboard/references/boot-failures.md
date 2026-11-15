@@ -8,9 +8,10 @@ Read at [`SKILL.md`](../SKILL.md) §1 step 3, when `whiteboard.sh start` exits n
 server logs a line with `waiting up to` or `is taken` before `[bridge] listening on
 http://127.0.0.1:<port>`; and when the panel's board switcher refuses a switch naming an older
 whiteboard server, a board open from another file, or a name whose recorded file no longer
-exists. At §1 step 2, a `locate` whose `otherFile` is `true` is § Exit 3's "is open from another
-file", and an exit 2 saying `which no longer exists` is § The name's recorded file no longer
-exists. Find the line below and do what it says. In owned mode the lines are the job's output; in
+exists or is outside this checkout. At §1 step 2, a `locate` whose `otherFile` is `true` is § Exit 3's "is open from another
+file", an exit 2 saying `which no longer exists` is § The name's recorded file no longer exists,
+and one saying `outside this checkout` is § The name's recorded file is outside this checkout.
+Find the line below and do what it says. In owned mode the lines are the job's output; in
 detached mode they are in the board's `.log`, and `start --detach` prints its end when the server
 exits. The design spec (§8.3, decisions #64, #65, #71 and #72) is `docs/whiteboard/SPEC.md` in
 https://github.com/spencermarx/skills.
@@ -49,7 +50,9 @@ A board is an absolute `.tldr` path inside the repository or the boards folder, 
 exists. `whiteboard.sh` checks this before it starts anything, and the server again at boot; the
 line names what failed. An unfilled `<…>` placeholder reaches it as literal text. Fix the name or
 path and run SKILL.md §1 step 2 again. A line saying `which no longer exists` is a name whose
-recorded file is gone: follow § The name's recorded file no longer exists.
+recorded file is gone: follow § The name's recorded file no longer exists. A line saying `outside
+this checkout` names a file nobody typed, so there is nothing to fix here: follow § The name's
+recorded file is outside this checkout.
 
 ## Exit 3: another server has the board's name
 
@@ -82,7 +85,9 @@ left. The boards folder's `<name>.tldr` is the copy the board left when it moved
 unless the user explicitly chooses it. Neither retry nor start by name. Instead:
 
 1. Find where the board now lives: once its worktree is merged and removed, the same path
-   relative to the main checkout; otherwise ask the user.
+   relative to the main checkout; otherwise ask the user. From a linked worktree, a path in the
+   main checkout lies outside this checkout and is refused too: it opens from a session in the
+   main checkout.
 2. Open it there by its path (`--board "<absolute path>"`). It reopens with an empty
    conversation, because its chat and workers' keys stay stamped to the old path (decision
    #72(4)), so no open Send is rung again; tell the user. Its port record then names the new
@@ -90,6 +95,22 @@ unless the user explicitly chooses it. Neither retry nor start by name. Instead:
 3. To reuse the name for a fresh board instead, remove `<name>.port` only after the user
    confirms. The name then means the boards folder's `<name>.tldr` again, which `new <name>`
    creates only if no copy is left there.
+
+## The name's recorded file is outside this checkout
+
+The line reads `board '<name>' is recorded at <boardPath>, outside this checkout (<repository>);
+see boot-failures.md § "The name's recorded file is outside this checkout".` `whiteboard.sh
+locate` and `start` exit 2 with it, before anything is created, and the panel's switcher refuses
+a new board of that name with `403` and the same text.
+
+Every checkout shares one boards folder, so a name's `.port` can record a tracked board in another
+checkout, most often the main checkout seen from a linked worktree. A board boots only from a
+checkout that holds its file. While a server holds exactly that file, `locate` does not refuse:
+it reports the board live with `outsideCheckout: true`, and SKILL.md §1 step 2 attaches.
+
+The boards folder's `<name>.tldr` is the copy the board left when it moved: never open it unless
+the user explicitly chooses it. Neither retry nor start by name. Tell the user the board's file
+and this checkout, and that the board opens from a session in a checkout that holds its file.
 
 ## Exit 4: an older whiteboard server is running
 

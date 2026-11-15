@@ -38,8 +38,8 @@ background job (`harness-notes.md` lists Claude Code's cases). That is why stopp
 takes the board down (content safe on disk) and why it is never a way to "restart" anything. The
 user's tab shows the board closing and holds any Send typed meanwhile.
 
-- **The user is about to quit:** tell them that opening the board again (`/whiteboard open
-  <board>`, or asking for it by name) brings it back.
+- **The user is about to quit:** tell them that opening the board again (asking for it by name)
+  brings it back.
 - **This session was resumed:** open the board yourself by name (SKILL.md §1). It boots the
   board's last file (a homed board's tracked copy, say) on the recorded port, the tab reconnects
   and sends what it held, and the Sends left open come back to you. If that file has moved or its

@@ -164,7 +164,7 @@
 // blob: 5 of 18 fail.
 //
 // Every server boots on an ephemeral port (its port record is removed first) against a wbtest_*
-// board in this suite's own throwaway repository, so no running board is ever touched. Phases C-W
+// board in this suite's own throwaway repository, so no running board is ever touched. Phases C-X
 // need Playwright's Chromium and the built app, and skip without them (as in CI).
 //
 //   node --import tsx tests/whiteboard/render-cap.test.ts   (run from the skill's server/)
@@ -1896,7 +1896,7 @@ async function main() {
   await phaseB();
   // Phases C onward run a real render-canvas: Playwright's Chromium and the built app. CI has neither.
   if (!hasChromium() || !hasAppBuild()) {
-    console.log('\n[SKIP] Phases C-W: they need Playwright\'s Chromium and the built app (scripts/whiteboard.sh install)');
+    console.log('\n[SKIP] Phases C-X: they need Playwright\'s Chromium and the built app (scripts/whiteboard.sh install)');
     console.log(`\n${passed} passed, ${failures.length} failed`);
     if (failures.length) { for (const f of failures) console.log(`  FAILED: ${f}`); process.exit(1); }
     process.exit(0);

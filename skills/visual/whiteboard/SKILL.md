@@ -67,8 +67,9 @@ the panel's "new board" uses), or `--board "<path>"` for a `.tldr` file in the r
 path is anything with a `/` or ending in `.tldr`). `--name` follows the name's `.port` when it
 records the board's file elsewhere (a board moved onto a tracked copy keeps its name). `open
 <name-or-path>` needs the file to exist and never creates it; `new <name>` errors if it exists;
-no argument opens, by `--name`, the board whose `.port` in the boards folder was written last,
-else `new` on a default name.
+no argument opens, by `--name`, the board whose `.port` in the boards folder was written last, as
+`open` does, except that its `<name>.tldr` in the boards folder is created if missing; else `new`
+on a default name.
 
 **2. Locate: attach or boot.**
 
@@ -76,16 +77,20 @@ else `new` on a default name.
 bash scripts/whiteboard.sh locate --name "<name>" --repo . --scratch <scratch folder>   # or --board "<path>"
 ```
 
-It prints `{ board, name, room, lock, port, messages, recipients, png, log, live, otherFile }`;
-read every field by name. `live` is the lock of a server that is serving this board's name now
+It prints `{ board, name, room, lock, port, messages, recipients, png, log, live, otherFile,
+outsideCheckout }`; read every field by name. `live` is the lock of a server that is serving this board's name now
 (its pid and its `parentPid` alive, and its port answering for this room), else `null`. Exit 2
 means the path is not a `.tldr` inside the repository or the boards folder, or its folder does
 not exist: say so and stop. An exit 2 whose line says `which no longer exists` is a name whose
 recorded file is gone: follow `references/boot-failures.md` § The name's recorded file no longer
-exists.
+exists. One that says `outside this checkout` is a name whose recorded file is in another checkout:
+follow § The name's recorded file is outside this checkout there.
 
 - **`otherFile` is `true`:** a live server holds another `.tldr` under this board's name. Neither
   attach nor boot: do what `references/boot-failures.md` § Exit 3 says.
+- **`outsideCheckout` is `true`:** the board's file lies outside this checkout, and a live server
+  holds exactly that file. Attach as below, but never boot it from here: once it is down, it boots
+  only from a checkout that holds its file.
 
 - **`live` is `null`:** boot (step 3). The new server replaces a stale lock.
 - **`live` is yours:** skip to step 5 with `live.port`. It is yours in owned mode when
