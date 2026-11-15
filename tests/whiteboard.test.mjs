@@ -1,7 +1,7 @@
 // Runs the whiteboard skill's suites under `node --test tests/`. They live in tests/whiteboard/ so
 // they never ship inside the skill. Every suite (`*.test.mjs` and `*.test.ts`) runs as
 // `node --import tsx <suite>` from the skill's server/ folder, so tsx and the server's dependencies
-// resolve; they need only those dependencies (`npm ci --prefix skills/_incubating/whiteboard/server`,
+// resolve; they need only those dependencies (`npm ci --prefix skills/visual/whiteboard/server`,
 // which CI runs) and skip without them. Most cases boot the real bridge headless
 // (WHITEBOARD_NO_CANVAS). The cases that need Chromium or the built app (busy-loop, render-cap's
 // real-canvas phases, sync-corruption's real-canvas boards, the real-browser boundaries,
@@ -17,10 +17,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = join(dirname(fileURLToPath(import.meta.url)), "whiteboard");
-const skill = join(here, "..", "..", "skills", "_incubating", "whiteboard");
+const skill = join(here, "..", "..", "skills", "visual", "whiteboard");
 const serverDir = join(skill, "server");
 const notInstalled = !existsSync(join(serverDir, "node_modules", "tsx", "package.json"))
-  && "the whiteboard server's dependencies are not installed (npm ci --prefix skills/_incubating/whiteboard/server)";
+  && "the whiteboard server's dependencies are not installed (npm ci --prefix skills/visual/whiteboard/server)";
 
 for (const suite of readdirSync(here).filter((f) => /\.test\.(mjs|ts)$/.test(f)).sort()) {
   test(`whiteboard ${suite}`, { skip: notInstalled }, () => {

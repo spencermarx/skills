@@ -63,6 +63,14 @@ A shape partial is `{ id, type, x, y, props }`. Prefer `updateShapes` (a partial
 merged onto an existing id) over deleting and recreating, so bindings and
 selection survive a nudge.
 
+A page holds at most `editor.options.maxShapesPerPage` shapes, 20,000 here
+(`@tldraw/editor/src/lib/options.ts`, raised from tldraw's 4,000 by the app). Past
+it, and on a locked shape, tldraw refuses the write without throwing; the
+render-canvas records each refusal of the blob's own writes, lets the blob
+finish, and the exec answers `ok:false` naming them
+([`exec-failures.md`](exec-failures.md)). An update or delete of an id that does
+not exist is a no-op.
+
 ### Geo shapes (rectangle, ellipse, … with text)
 
 A box is `type: 'geo'` with `props.geo` set to a **valid geo value**. The
@@ -213,6 +221,12 @@ not by a blob you write. The underlying calls, if you need them:
 
 `opts` is `TLImageExportOptions` (`:8886`). Pass `editor.getCurrentPageShapes()`
 (or a shape-id list) as the first argument to export the whole board.
+
+`toImage` builds an SVG of every shape it is given, about 2 ms a shape, so the
+app sends it only the shapes that meet a requested region, and draws a picture that
+would hold more than 2,000 shapes as an outline overview instead (SPEC §6.1). A
+picture captioned `Overview:` shows layout, colour and frame names, and none of
+the shapes' text.
 
 ### Authorship stamping — `editor.sideEffects` [v5]
 

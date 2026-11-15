@@ -12,13 +12,15 @@
 #                                                        run the board's server (--detach: in a
 #                                                        session of its own; wait until it is live)
 #
-# Boards: the boards folder is <repo>/<scratch>/whiteboard/. A board is its .tldr file, inside the
-# repository or the boards folder; its room id is the file's name without `.tldr`, and its lock,
-# port record, chat log, recipients, render and server log live in the boards folder, named by that
-# room id. `--name NAME` names the board <boards folder>/<slug of NAME>.tldr, by the same slug rule
-# the panel's "new board" uses. `locate` prints {board, name, room, lock, port, messages, recipients,
-# png, log, live} as JSON, where `live` is the lock of a running server that holds the board, else
-# null (server/boards.mjs).
+# Boards: the boards folder is <scratch>/whiteboard/, a relative <scratch> taken from the main
+# checkout even when <repo> is a linked worktree, so every checkout shares it. A board is its .tldr
+# file, inside the repository or the boards folder; its room id is the file's name without `.tldr`,
+# and its lock, port record, chat log, recipients, render and server log live in the boards folder,
+# named by that room id. `--name NAME` names the board <boards folder>/<slug of NAME>.tldr, by the
+# same slug rule the panel's "new board" uses, unless the name's port record names its file
+# elsewhere. `locate` prints {board, name, room, lock, port, messages, recipients, png, log, live,
+# otherFile} as JSON, where `live` is the lock of a running server that holds the board's name, else
+# null, and `otherFile` says that server holds another file under the name (server/boards.mjs).
 #
 # `start` refuses a board outside the repository and the boards folder, or in a folder that does not
 # exist, and a board a live server already holds, before it creates anything. It then creates the
@@ -35,7 +37,7 @@
 #
 # Runtime location, in order of preference:
 #   1. this skill's own folder (app/ and server/), when it is writable;
-#   2. <repo>/<scratch>/whiteboard-runtime/, a copy of app/ and server/, when it is not (a
+#   2. <scratch>/whiteboard-runtime/, a copy of app/ and server/, when it is not (a
 #      plugin cache can be read-only). The scratch folder defaults to .scratchpad.
 # An install counts only when both node_modules were installed from the skill's current
 # lockfiles and the app was built from its current sources, so a skill update asks for a fresh
@@ -48,8 +50,10 @@
 #      board, or a detached server did not come up (the end of its log is on stderr); after a
 #      timeout it may still come up, so run `locate` again before starting another
 #   2  a bad argument, or a board that is not a .tldr file inside the repository or the boards
-#      folder, or whose folder does not exist (refused before anything is created)
-#   3  another live server holds the board (start); attach to the server its JSON or log line names
+#      folder, or whose folder does not exist, or a name whose recorded file no longer exists
+#      (refused before anything is created)
+#   3  another live server holds the board (start); attach to the server its JSON or log line names,
+#      unless it holds another file under the board's name (`otherFile`): then never attach
 #   4  a whiteboard server too old to record its owner is running (start); see its log line
 #   5  not installed (status prints what install would run; start refuses)
 #
@@ -98,9 +102,29 @@ fi
 # Physical paths throughout: npm ci --prefix misreads the lockfile when the prefix runs
 # through a symlink (macOS /tmp is one).
 repo="$(cd "$repo" && pwd -P)"
+
+# The main checkout of the repository at $1, whose scratch folder every linked worktree shares, as
+# the scratchpad skill's `scratchpad.sh root` does: one boards folder, so one lock per board, from
+# any checkout (SPEC decision #71). It is the first entry `git worktree list` prints, trusted once
+# it is confirmed to be a working tree (a bare repository or --separate-git-dir names something that
+# is not one); else $1. Asked without the variables that point git at another repository (GIT_DIR
+# from a git hook or `git rebase --exec`).
+main_checkout() {
+  local main
+  main="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE \
+    git -C "$1" worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p')"
+  if [ -n "$main" ] && [ -d "$main" ] &&
+    [ "$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE \
+      git -C "$main" rev-parse --show-toplevel 2>/dev/null)" = "$main" ]; then
+    (cd "$main" && pwd -P)
+  else
+    echo "$1"
+  fi
+}
+
 case "$scratch" in
   /*) scratch_dir="$scratch" ;;
-  *) scratch_dir="$repo/${scratch%/}" ;;
+  *) scratch_dir="$(main_checkout "$repo")/${scratch%/}" ;;
 esac
 readonly FALLBACK_DIR="$scratch_dir/whiteboard-runtime"
 readonly BOARDS_DIR="$scratch_dir/whiteboard"
@@ -294,6 +318,10 @@ case "$cmd" in
     # 1. Refuse a board outside the repository or in a folder that does not exist (exit 2), or one
     #    already live (exit 3), creating nothing. Every exit 2 is decided here.
     where="$(locate_board)" && rc=0 || rc=$?
+    if [ "$rc" -eq 3 ] && [ "$(json_field "$where" otherFile)" = "true" ]; then
+      echo "whiteboard.sh: another file of this board's name is live (above); neither attach nor start." >&2
+      exit 3
+    fi
     if [ "$rc" -eq 3 ]; then
       echo "whiteboard.sh: this board is already live; attach to it instead of starting another server:" >&2
       echo "$where" >&2
@@ -328,6 +356,7 @@ case "$cmd" in
         gone=0
         kill -0 "$child" 2>/dev/null || gone=1
         where="$(locate_board)" && rc=0 || rc=$?
+        if [ "$rc" -eq 3 ] && [ "$(json_field "$where" otherFile)" = "true" ]; then exit 3; fi
         if [ "$rc" -eq 3 ]; then echo "$where"; exit 0; fi
         [ "$rc" -eq 0 ] || exit "$rc"
         if [ "$gone" -eq 1 ]; then

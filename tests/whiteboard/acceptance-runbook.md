@@ -8,12 +8,24 @@ board being released or held by an owner that is not answering, the transactiona
 switch, the Origin/Host guard),
 `acceptance-v9.1.test.ts` (the recipient guard and the teardown seam),
 `integration.test.ts` (the durable floor, workers, revival),
-`busy-loop.test.ts` (a dead log pipe, a frozen canvas, the owner dying) and
+`busy-loop.test.ts` (a dead log pipe, a frozen canvas, the owner dying),
+`cross-checkout.test.ts` (one lock across checkouts in both boot orders, a same-named
+file from another checkout refused at boot and in the app's switcher with `409`, a lock
+without `boardPath` counted as the same board, a same-server switch onto a same-named file
+with the conversation and other tabs following, unstamped entries adopted, a fresh server on
+another file, canonical paths, reopening a homed board by name, a name whose recorded file no
+longer exists refused with the record left as it is, and a record for another file name
+counted as none) and
 `render-cap.test.ts` (the `?bounds=` forwarding and the no-frame timeout against a fake
 canvas, and, in a real Chromium, the render-canvas relaunch after a renderer crash, a failed
 navigation, a switch during the relaunch, a renderer that stops answering, a switch during
-the boot launch and a switch to an empty board, a give-up that a later launch withdraws, perception during a frozen navigation and during a relaunch, and what a failed `/exec` leaves;
-the app-side raster cap is not covered). What is
+the boot launch and a switch to an empty board, a give-up that a later launch withdraws, perception during a frozen navigation and during a relaunch, what a failed `/exec` leaves, and a
+board past 4,000 shapes: its overview, a region inside a large frame, an empty region, the
+writes tldraw refuses answering `ok:false` (locks, inside `editor.run` too, a locked duplicate,
+`moveShapesToPage` at the cap), the writes it does not refuse (a re-lock, `toggleLock`,
+`ignoreShapeLock`), an id-less create, and a box bound to an arrow in a locked frame deleted by
+a blob and by an operator peer, and the app-side raster cap: the 2,200 px downscale on the
+overview and `pixelRatio` 1 on a full-detail region). What is
 left needs an operator at the browser, a lead session running the skill, and a real turn
 cycle: a ring arriving in the session, the model fetching it, mid-draw pickup, the
 board's lifetime, the teardown affordance, and per-object authorship on the live canvas.
@@ -21,7 +33,7 @@ board's lifetime, the teardown affordance, and per-object authorship on the live
 Sections 0 to 5 are the Claude Code path (the doorbell, the canary, the owned boot); section 6
 is the pull path every other harness takes. Run it on the branch, from the repository root, after
 installing the runtime, which also builds the app:
-`bash skills/_incubating/whiteboard/scripts/whiteboard.sh install --repo . --scratch .scratchpad`.
+`bash skills/visual/whiteboard/scripts/whiteboard.sh install --repo . --scratch .scratchpad`.
 `<port>` is the port the server prints on boot; `<board>` is its name; the board's files are in
 the boards folder, `.scratchpad/whiteboard/`.
 
@@ -56,8 +68,8 @@ Each Send goes from the browser's Send box.
    before its next draw call, and it stops.
 5. **A close.** Press the drawer's confirm-gated **close-session** control. **Expect:**
    the session is rung for a teardown item, posts a closing note, runs the pre-teardown
-   gate and performs `POST /done`; `<board>.lock` and `<board>.port` are removed and the
-   background job ends.
+   gate and performs `POST /done`; `<board>.lock` is removed, `<board>.port` keeps only
+   `board` and `boardPath`, and the background job ends.
 
 ## 2. Not heard is loud
 
@@ -113,7 +125,7 @@ belong to. What this section checks live is the lead's use of the stamps.
 Run it from a plain terminal, or a harness other than Claude Code. Nothing in it uses an inbox.
 
 1. Boot detached, from a shell you will close afterwards:
-   `bash skills/_incubating/whiteboard/scripts/whiteboard.sh start --detach --name <board> --repo . --scratch .scratchpad`.
+   `bash skills/visual/whiteboard/scripts/whiteboard.sh start --detach --name <board> --repo . --scratch .scratchpad`.
    **Expect:** exit 0 and the board's JSON with `live` set; the lock has `detached:true` and a
    `parentPid` equal to its own `pid`; the server's output goes to `<board>.log` in the boards folder.
    `GET /canvas-status` shows `detached:true` and `doorbell.mode:"pull"`.

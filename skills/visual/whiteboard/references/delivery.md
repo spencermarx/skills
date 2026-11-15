@@ -98,5 +98,7 @@ The tab posts Sends and the close request one at a time, in the order typed:
 - **"not sent: sends when the board is back"**: held, and retried until the board answers;
 - **"not sent (<status>)"**: refused, and never stored, so it never reached you.
 
-The chat is kept in the boards folder as `<room>.messages.jsonl`. You speak in it only through
+The chat is kept in the boards folder as `<room>.messages.jsonl` and belongs to the board's
+file, not only its name: a server on another file of the same name starts an empty chat, and a
+switch onto a same-named file brings the chat along (decision #72). You speak in it only through
 `/agent-message` with your `sessionId`.

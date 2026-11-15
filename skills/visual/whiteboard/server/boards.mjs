@@ -8,11 +8,13 @@
 // a lock to say whether a live server holds it.
 //
 //   node boards.mjs (--board <file.tldr> | --name <name>) --home <boards folder> --repo <repository>
-//     prints {board, name, room, lock, port, messages, recipients, png, log, live} as JSON. `--name`
-//     resolves to <boards folder>/<slugFor(name)>.tldr. `live` is the lock when a live server holds
-//     the board (see liveOwner), else null. Exit 0 when nothing live holds it, 3 when a live server
-//     does, 2 on a bad argument or a board the placement rule refuses (refused before anything is
-//     created; the reason is on stderr).
+//     prints {board, name, room, lock, port, messages, recipients, png, log, live, otherFile} as
+//     JSON. `--name` resolves through boardFileForName: <boards folder>/<slugFor(name)>.tldr, or the
+//     file its port record names. `live` is the lock when a live server holds the board's name (see
+//     liveOwner), else null; `otherFile` is true when that server holds another file under the name
+//     (said on stderr too). Exit 0 when nothing live holds it, 3 when a live server does, 2 on a bad
+//     argument, a board the placement rule refuses, or a name whose recorded file no longer exists
+//     (refused before anything is created; the reason is on stderr).
 
 import fs from 'node:fs';
 import http from 'node:http';
@@ -59,6 +61,38 @@ export function slugFor(name) {
     .slice(0, 80)
     .replace(/[-.]+$/g, '');
   return slug || 'board';
+}
+
+/**
+ * The file a bare board name opens, or why it opens none (SPEC decision #72 clause 6). A same-name
+ * switch moves the board onto another file and stamps `<name>.port` with it, and every exit keeps
+ * the record (/done without its port), so the record is the one pointer to the file the board was
+ * last saved to; `<name>.tldr` in the boards folder may be a copy the board has left. So:
+ *   - a record counts only if its `boardPath` is an absolute path whose file name is exactly
+ *     `<name>.tldr` (case-sensitive, as room ids compare); any other record is no record;
+ *   - no record, a record with no `boardPath`, or one naming the boards folder's `<name>.tldr`:
+ *     that file;
+ *   - a record naming a file that exists: that file;
+ *   - a record naming another file that no longer exists: refused, never the boards folder's copy,
+ *     and the record is left as it is, since it is the only pointer to that file. That copy stays
+ *     openable by its explicit path.
+ * An explicit path is never resolved through it. `name` is already a slug (slugFor).
+ * @param {string} home the boards folder, canonical
+ * @param {string} name
+ * @returns {{ ok: true, boardPath: string } | { ok: false, error: string }}
+ */
+export function boardFileForName(home, name) {
+  const inHome = canonicalBoardPath(path.join(home, `${name}.tldr`));
+  let recorded;
+  try {
+    recorded = JSON.parse(fs.readFileSync(path.join(home, `${name}.port`), 'utf8'))?.boardPath;
+  } catch {
+    return { ok: true, boardPath: inHome }; // no record, or unreadable: the name is its file in the boards folder
+  }
+  if (typeof recorded !== 'string' || !path.isAbsolute(recorded) || path.basename(recorded) !== `${name}.tldr`) return { ok: true, boardPath: inHome };
+  const boardPath = canonicalBoardPath(recorded);
+  if (boardPath === inHome || fs.existsSync(boardPath)) return { ok: true, boardPath };
+  return { ok: false, error: `board '${name}' is recorded at ${recorded}, which no longer exists; see boot-failures.md § "The name's recorded file no longer exists".` };
 }
 
 /**
@@ -136,9 +170,10 @@ export function sidecarPaths(home, room) {
 }
 
 /**
- * The lock the bridge writes: `board` is the room id; `parentPid` the process it exits with (its own
- * pid when `detached`).
- * @typedef {{ port: number, pid: number, board?: string, startedAt?: number, ownerSession?: string,
+ * The lock the bridge writes: `board` is the room id; `boardPath` the board's file, absent in a lock
+ * from a server older than decision #71; `parentPid` the process it exits with (its own pid when
+ * `detached`).
+ * @typedef {{ port: number, pid: number, board?: string, boardPath?: string, startedAt?: number, ownerSession?: string,
  *   ownerSessionId?: string, parentPid?: number, ownerIsClaude?: boolean | null, detached?: boolean }} LockInfo
  */
 
@@ -240,7 +275,16 @@ if (isMain()) {
   }
   const home = canonicalBoardPath(args.home);
   const repo = canonicalBoardPath(args.repo);
-  const board = canonicalBoardPath(args.board ?? path.join(home, `${slugFor(args.name ?? '')}.tldr`));
+  let board;
+  if (args.board) board = canonicalBoardPath(args.board);
+  else {
+    const resolved = boardFileForName(home, slugFor(args.name ?? ''));
+    if (!resolved.ok) {
+      console.error(`boards.mjs: ${resolved.error}`);
+      process.exit(2);
+    }
+    board = resolved.boardPath;
+  }
   const refusal = placementRefusal(board, repo, home);
   if (refusal) {
     console.error(`boards.mjs: ${refusal}`);
@@ -248,6 +292,11 @@ if (isMain()) {
   }
   const room = roomFor(board);
   const live = await liveOwner(home, room);
-  console.log(JSON.stringify({ board, name: displayName(board), room, ...sidecarPaths(home, room), live }));
+  // [#71] A live server holding this name for another file is not this board's server: never attach.
+  const otherFile = !!live && typeof live.boardPath === 'string' && canonicalBoardPath(live.boardPath) !== board;
+  if (otherFile) {
+    console.error(`boards.mjs: board '${room}' is open from another file: ${live.boardPath} (pid ${live.pid}, port ${live.port}); not serving ${board}. Close it there, or open that file.`);
+  }
+  console.log(JSON.stringify({ board, name: displayName(board), room, ...sidecarPaths(home, room), live, otherFile }));
   process.exit(live ? 3 : 0);
 }

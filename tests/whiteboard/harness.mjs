@@ -12,7 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-export const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'skills', '_incubating', 'whiteboard');
+export const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'skills', 'visual', 'whiteboard');
 export const SERVER_DIR = path.join(SKILL_DIR, 'server');
 export const TSX = path.join(SERVER_DIR, 'node_modules', '.bin', 'tsx');
 // The board identity the server and whiteboard.sh use, so a suite derives the same room ids.
