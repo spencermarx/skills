@@ -203,7 +203,7 @@ when a task matches.
 | [`setup-aclarify-skills`](skills/core/setup-aclarify-skills) <kbd>/</kbd> | Configure a repository for these skills and the tools they need |
 | [`conveying-clearly`](skills/core/conveying-clearly) | Write a message a colleague reads once and acts on, point first |
 | [`scratchpad`](skills/core/scratchpad) | Keep working files in one git-ignored folder, and find or clean them later |
-| [`handoff`](skills/core/handoff) | Compact a session into a document a fresh agent can resume from |
+| [`handoff`](skills/core/handoff) | Compact a session into a document a fresh agent resumes from, and launch that session where the harness can |
 | [`create-report`](skills/core/create-report) | Render a markdown record as a self-contained visual HTML report |
 
 <sub>[Back to catalog](#catalog)</sub>
