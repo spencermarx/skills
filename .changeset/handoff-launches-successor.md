@@ -1,5 +1,0 @@
----
-"aclarify-skills": minor
----
-
-`handoff` now launches its successor. In Claude Code it launches the next session with `claude --bg`, carrying every launch flag from the job's state record inside a background job (model and effort outside one), names it by the `<repo>: <subject> - <N>` chain, and seeds it to stop this session once it has read the document; "don't launch" or a later pickup keeps the old document-plus-seed delivery, and "keep this session" launches without the stop. Every other harness delivers the document and the seed line as before. Before writing, it settles subagents still running (wait for one well along, stop the rest and save their briefs beside the handoff) and records held resources, which it releases before the launch. The document opens on what the work is for and how the result looks now, carries a banner telling the successor what to trust, quotes every ruling and correction, marks what waits on the user `[gate: user]`, and makes every claim say how it was checked, with where it ran and at which SHA.
