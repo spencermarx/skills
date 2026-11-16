@@ -95,6 +95,15 @@
     - type: not-skill-used
       value: scratchpad
 
+- description: the context-pressure phrasing the description now names, asking for a new session outright
+  vars:
+    query: the context is filling up, start a fresh session on this and carry everything over
+  assert:
+    - type: skill-used
+      value: handoff
+    - type: not-skill-used
+      value: scratchpad
+
 # ---------------------------------------------------------------------------
 # Near-misses. Every one is a written artifact produced at the end of a session,
 # which is exactly why they are the cases worth running.

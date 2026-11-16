@@ -1,12 +1,13 @@
 ---
 name: handoff
 description: >-
-  Compact the current session into a handoff document: the load-bearing references,
-  decisions and resume coordinates, none of the transcript noise, so a fresh agent carries
-  it on. Use whenever someone says hand this off, write a handoff, I am running out of
-  context, note where to resume, or pick this up in a new session. Do NOT use to word one
-  message well (use `conveying-clearly`), to open a plain scratch file (use `scratchpad`),
-  or to record a settled decision (use `decision-record`).
+  Compact the session into a handoff document (the next action, rulings, dead ends,
+  resume coordinates) and, where the harness can launch a background session, launch the
+  successor and stop this one. Use whenever someone says hand this off, write a handoff,
+  the context is filling up, I am running out of context, note where to resume, or pick
+  this up in a new session. Do NOT use to word one message well (use
+  `conveying-clearly`), to open a plain scratch file (use `scratchpad`), or to record a
+  settled decision (use `decision-record`).
 license: MIT
 argument-hint: '[what the next session will focus on]'
 metadata:
@@ -15,32 +16,15 @@ metadata:
 
 # Handoff
 
-A session is about to end and the work is not done. What you were doing, the
-three things you already ruled out, the exact file you stopped in, the gotcha
-that cost you an hour: all of it lives only in this conversation. The next agent
-boots cold. It gets the repository, its agent instructions, and whatever memory
-the harness keeps, and none of your live thread.
+The successor boots cold: the repository, its agent instructions, whatever
+memory the harness keeps, and none of this conversation. Carry the live thread
+nothing else holds (the next action, what you ruled out, where you stopped) and
+the coordinates to resume, and link every artifact that holds the rest. A pasted
+transcript buries the thread; a tidy summary drops it, and the successor starts
+confidently on the wrong thing.
 
-The whole job is compaction: squeeze the session down to its resumable core, so
-the next agent inherits the momentum and not the noise. There are two ways to
-fail:
-
-- **Too much.** You paste the transcript, or re-explain what an issue, a spec or
-  a decision record already says. The next agent drowns and re-reads everything
-  anyway.
-- **Too little.** You write a tidy summary that quietly drops the load-bearing
-  specifics: the exact next action, the dead end not to retry, the file you
-  stopped in. The next agent looks confident and rebuilds the wrong thing.
-
-Most durable context already lives in artifacts. Your handoff **points** at
-those, never copies them. What it must carry itself is only the live thread that
-is not written down anywhere yet, plus the mechanical coordinates to reconstitute
-the workspace. Everything else is a link.
-
-Write for a smart stranger who has your tools and your repository but zero
-memory of this conversation. If a sentence would be obvious to them from the
-artifacts, cut it and link the artifact. If it would not be recoverable without
-you in the room, it belongs in the handoff.
+Paths below are relative to this skill's directory; resolve them to absolute
+paths before running anything.
 
 ## Where things live
 
@@ -58,124 +42,167 @@ defaults below and suggest the user run the `setup-aclarify-skills` skill.
 - **Conventions folder** (`docs/agents/workspace.md`): house rules, including
   any on confidentiality. Default: none.
 
-## Step 1: recon the mechanical state
-
-Before writing prose, capture the facts a summary loses. Run what is relevant.
+## Step 1: recon, and settle what is running
 
 ```bash
-git branch --show-current     # the branch to resume on
-git status --short            # uncommitted work: the live edit surface
-git log --oneline -8          # recent commits, for narrative anchor
-git stash list                # anything parked
-pwd                           # the working directory: matters in a worktree
-git worktree list             # is this a worktree? the next session must enter the SAME one
+git rev-parse --show-toplevel   # where the successor opens
+git rev-parse --short HEAD      # the SHA this handoff describes
+git status -sb                  # branch, upstream, uncommitted work
+git log --oneline -8
+git stash list                  # a shared stack: name only your entries
+git worktree list               # in a worktree, the successor opens in the same one
+gh pr view --json number,url,state,reviewDecision   # GitHub only; then gh pr checks, for CI
 ```
 
-Then take stock of what git will not show you:
+**Can this session launch its successor?** Only where the harness can start a
+background session from the shell and report its id, as Claude Code's
+`claude --bg` does. There, load
+[references/what-carries-over.md](references/what-carries-over.md) now: inside a
+background job it reads the job's state record (this session's name and id for
+the document, the launch flags and any persona prefix for Step 4), and outside
+one it says what the launch carries instead. Anywhere else, Step 4 delivers the
+document and a seed line, and launches nothing.
 
-- **Background processes** you started, and what each is watching: a dev
-  server, a CI watch, a running test. The next agent needs to know they exist,
-  or to restart them.
+Then take stock of what git does not show:
+
+- **Background processes** you started: each dies with this session, so its
+  command goes under Resume coordinates.
+- **Held resources**: what the successor must own, such as a server this session
+  started (a `whiteboard` board, a dev server holding a port). Step 4 releases
+  them.
 - **State outside the repository**: a document shared, a message sent, an
-  external system touched, a database rebuilt, a key rotated. Anything that will
-  not be obvious from the files.
+  external system touched, a database rebuilt, a key rotated.
 - **Relevant memory.** If your harness keeps a persistent memory with an index
-  (a `MEMORY.md`, for example), skim it for entries this work already has. Where
-  one exists, the handoff references it instead of restating its contents. If
-  this session materially changed the state a memory describes, updating that
-  memory is often the more durable move than the handoff carrying it.
-- **Parked items this work already touched.** Check the issue tracker, and any
-  list of deferred work the repository keeps. If something belongs there rather
-  than in a handoff, **put it there instead** (asking first if creating it needs
-  the user's say-so). A tracked item survives; a handoff in scratch gets swept.
+  (a `MEMORY.md`, for example), skim it for entries this work already has. The
+  handoff references them rather than restating them; if this session changed
+  the state one describes, updating that memory is the more durable move.
+- **Parked items this work touched.** Anything with a durable home goes to the
+  issue tracker, or the repository's list of deferred work, instead (asking
+  first if creating it needs the user's say-so): a tracked item survives, and a
+  handoff in scratch is swept.
 
-That last point is the most common mistake. A handoff is for the live thread, not
-for anything that has a durable home.
+Unless the request is **Keep this session** (Step 4), whatever this session
+dispatched stops with it. Settle each subagent or background task still in
+flight:
+
+- **Well along**, with less left than a restart costs: wait for it. Say which
+  you are waiting on, then end your turn if its completion resumes you;
+  otherwise wait in place. Where ending the turn ends the run (a headless,
+  one-shot invocation), treat each as Otherwise.
+- **Otherwise:** stop it, and keep its brief, verbatim, with any partial
+  findings. Step 2 saves them beside `HANDOFF.md`, and re-dispatching it becomes
+  an item under Next steps.
 
 ## Step 2: write the document
 
+If the user passed an argument, it is the next session's focus: tailor the
+document to it, so "send the proposal" foregrounds the Done-bar and "find why
+the numbers disagree" the Landmines.
+
 Save into the git-ignored scratch folder, never into tracked files: a handoff
-under version control becomes a permanent artifact that turns up in every search,
-competing with the project's real documents.
+under version control turns up in every search, competing with the project's
+real documents. Load the `scratchpad` skill (through your skill tool,
+`/scratchpad`, or by reading its SKILL.md), then run its
+`new handoffs '<short-slug>'` verb by the absolute script path that skill
+describes, as one plain command, not wrapped in `$(…)`, which some sandboxed
+sessions refuse. Write `HANDOFF.md` at the absolute directory it prints, never
+at a hand-written `.scratchpad/...` path, which resolves against your current
+directory and strands the file.
 
-Load the `scratchpad` skill (through your skill tool, `/scratchpad`, or by
-reading its SKILL.md), then run its `new handoffs '<short-slug>'` verb, by the
-absolute script path that skill describes and with the configured scratch folder
-if it is not the default. Run it as one plain command, not wrapped in `$(…)`,
-which some sandboxed sessions refuse. Write `HANDOFF.md` inside the directory it
-printed, at that absolute path. Never at a hand-written `.scratchpad/...` path,
-which resolves against your current directory and strands the file.
-
-**If that write is refused**, you are probably in an isolated background session
-and the entry lives at the main checkout, which your file-editing tools may not
-reach. Draft `HANDOFF.md` outside the repository, then move it in with the same
-script's `place` verb: `place '<the printed directory>' HANDOFF.md '<abs path to
-your draft>'`. Do not answer that refusal by writing into a worktree-local
-scratch folder: the handoff dies the moment the worktree is removed.
-`scratchpad`'s `references/writing-into-a-locked-entry.md` has the reasoning and
-the shapes `place` refuses.
-
-The next session finds the latest handoff by running that same script with
-`list handoffs`.
+**If that write is refused**, the entry probably lives at the main checkout,
+beyond an isolated session's reach. Draft `HANDOFF.md` outside the repository,
+then move it in with the same script's `place` verb:
+`place '<the printed directory>' HANDOFF.md '<abs path to your draft>'`.
+Never answer the refusal by writing into a worktree-local scratch folder: the
+handoff dies with the worktree. `scratchpad`'s
+`references/writing-into-a-locked-entry.md` has the reasoning.
 
 **If `scratchpad` is not installed**, create
 `<scratch folder>/handoffs/<UTC-YYYYMMDD-HHMMSS>-<short-slug>/HANDOFF.md` at the
 top of the main checkout (the first path `git worktree list` prints), and make
-sure git ignores the scratch folder. Outside a git repository, save it to the
-operating system's temp directory (`$TMPDIR`, else `/tmp`; `%TEMP%` on Windows)
-instead.
+sure git ignores the scratch folder. Outside a git repository, use the operating
+system's temp directory (`$TMPDIR`, else `/tmp`; `%TEMP%` on Windows).
 
-The structure is in
-[references/document-template.md](references/document-template.md). Load it now.
-**Omit any section that is empty**: a padded handoff is noise wearing a template.
+Each brief kept in Step 1 goes beside `HANDOFF.md` as `brief-<label>.md`, and so
+does any file the successor needs from this session's temp directory, which
+dies with the session.
 
-Two things that trip up the compaction:
+Load [references/document-template.md](references/document-template.md) now,
+and omit any section that is empty.
 
-- **A fact that fits two sections** belongs in one. The classic case is a dead
-  end that is also the reasoning for where the work should go instead. Put it
-  where the reader needs it most, usually Landmines, and let the other section
-  point at it in a clause. One crisp pointer beats two near-duplicates.
-- **An artifact that is also a live edit** gets linked, and you carry only the
-  delta: what is done, what is in flight, where you stopped. Do not transcribe a
-  list the artifact already holds.
+**Every claim you pass on says how you know it.** A fact about a file, a tool, a
+system or a person's position is either checked this session, and written with
+what showed it (the command, the file and line, the message), or carried from
+memory, a subagent's report or an inference, and marked **unverified** with
+where to check it. A passing check names where it ran and at which SHA: a
+worktree passes where CI fails. Before you mark a claim checked, check it now.
 
-## Step 3: redact before you save
+A fact that fits two sections goes in one, usually Landmines, and the other
+points at it. An artifact that is also a live edit is linked, with only the
+delta carried.
 
-The document may be pasted into a fresh session or shared. Strip API keys, secret
-values, passwords, tokens, connection strings, and personal data on the way in.
-Reference where a secret lives (the vault slot, the environment variable's name)
-rather than its value.
+## Step 3: read it as the successor, then redact
 
-If the conventions folder holds a confidentiality rule, apply it in full. A
-handoff carrying a client's commercial terms is exactly the artifact that gets
-pasted somewhere it should not be.
+Read the draft once, cold, as the successor will: the repository, this file,
+nothing else. It is ready when:
 
-## Step 4: deliver it
+- the first Next steps item can be acted on within a minute without the
+  transcript;
+- every dead end is under Landmines, and anything half-built names where it
+  stopped;
+- every claim names how it was checked, or is marked unverified;
+- every ruling and correction the user gave this session is quoted;
+- whatever the user is waiting on is Next steps item 1, and every item that
+  waits on the user is marked `[gate: user]`.
 
-Report back with:
+Fix what fails, and only that. Then redact: strip API keys, secret values,
+passwords, tokens, connection strings and personal data, referencing where a
+secret lives (the vault slot, the environment variable's name) rather than its
+value. If the conventions folder holds a confidentiality rule, apply it in full.
 
-1. The **absolute path** the script printed. Never a relative one: the reader,
-   or the agent they paste it into, may sit in a different worktree, where a
-   relative path points nowhere.
-2. A copy-pasteable **seed instruction** for the next session, for example:
-   `Read <absolute path> and continue the work; start with the first item under "Next steps".`
+## Step 4: deliver, and launch the successor where you can
 
-Then stop. Do not launch the next session yourself unless asked. The default
-deliverable is the document plus the seed line, so the person chooses when and
-where to resume.
+A subagent or fork never launches. It may see its parent's job record, so a
+successor it started would stop the parent: it writes the document, returns its
+absolute path, and stops there.
 
-## If the user passed an argument
+Where Step 1 found this session can launch its successor, the handoff launches
+it, and the successor stops this session, so the user steps straight into the
+new one. That is the default even when you fired the skill unasked. The request
+opts out by what it means, not its exact words:
 
-Treat it as the focus of the next session and tailor the whole document to it. A
-handoff aimed at "finish the proposal and send it" foregrounds the done-bar and
-the open questions; one aimed at "work out why the numbers disagree" foregrounds
-the landmines and what has already been ruled out. Same session, different lens.
+- **Not now** ("don't launch", or a later pickup: "tomorrow", "before I stop for
+  the day"): report the document and the launch line, and stay open.
+- **Keep this session**: launch, with the seed's stop sentence left out.
 
-## Gut-check
+Where it cannot launch, and in a headless run with no one to step across: report
+the document and the seed line, and stop.
 
-Read the draft once as the stranger who will receive it and ask: could I resume
-from this alone, without the transcript? If the answer is "not without guessing
-the branch", "not without knowing what you already tried", or "not without the
-specific next action", fix that and only that.
+The seed line:
+`Read <absolute HANDOFF path> and continue the work. <stop sentence> Then start with the first item under "Next steps".`
+The stop sentence, the launch command and the successor's name are in
+[references/what-carries-over.md](references/what-carries-over.md). The seed has
+no stop sentence without a launch, for **Keep this session**, or where this
+session is not a background job the successor can stop.
 
-The bar is resumability. Nothing more, nothing less.
+### Report, release, then launch
+
+Report first, in the same message as the launch, so the report survives
+whatever follows:
+
+1. The **absolute path** of `HANDOFF.md`, never a relative one: the reader may
+   sit in a different worktree.
+2. The full seed line, or the full launch line where there is one, for a
+   relaunch by hand.
+3. Where launching: the successor's name, and how to reopen this session with
+   its conversation intact, or, where nothing will stop it, that this session
+   can be closed.
+
+Release each held resource the document records, so the successor starts its
+own instead of joining one that dies with this session. A worktree stays: the
+successor runs in it.
+
+Launch from the top level Step 1 printed, with the command the reference gives.
+Once it reports the new session's id, say `Launched <name> (<id>)` and end your
+turn. With no id, restart what you released, say the launch failed, and stay
+open.
