@@ -1,5 +1,13 @@
 # aclarify-skills
 
+## 0.4.0
+
+### Minor Changes
+
+- [#11](https://github.com/spencermarx/skills/pull/11) [`8a7d7f4`](https://github.com/spencermarx/skills/commit/8a7d7f434ecd960bff3d3466e8b00162767d04b4) Thanks [@spencermarx](https://github.com/spencermarx)! - `handoff` now launches its successor. In Claude Code it launches the next session with `claude --bg`, carrying every launch flag from the job's state record inside a background job (model and effort outside one), names it by the `<repo>: <subject> - <N>` chain, and seeds it to stop this session once it has read the document; "don't launch" or a later pickup keeps the old document-plus-seed delivery, and "keep this session" launches without the stop. Every other harness delivers the document and the seed line as before. Before writing, it settles subagents still running (wait for one well along, stop the rest and save their briefs beside the handoff) and records held resources, which it releases before the launch. The document opens on what the work is for and how the result looks now, carries a banner telling the successor what to trust, quotes every ruling and correction, marks what waits on the user `[gate: user]`, and makes every claim say how it was checked, with where it ran and at which SHA.
+
+- [#8](https://github.com/spencermarx/skills/pull/8) [`6650146`](https://github.com/spencermarx/skills/commit/6650146526642932305623a40824f01944502c51) Thanks [@spencermarx](https://github.com/spencermarx)! - `whiteboard` leaves incubating and joins the visual family, so a bare `npx skills add` and the plugin now install it. It also takes upstream's v9.12 and v9.13. A board grows past 4,000 shapes (to 20,000 a page), and a write tldraw refuses (a full page, a locked shape) now fails its `/exec`, naming each refusal, instead of answering `ok:true` for shapes that were never drawn; a picture of more than 2,000 shapes is a captioned outline overview, and a zoom reaches full detail. Every linked worktree now shares the main checkout's boards folder, so a second server on a board is refused from any checkout, and a board's name is backed by one file: a server on another file of the same name is refused rather than attached to, a switch onto a same-named copy brings the chat along, and a name whose recorded file is gone is refused rather than reopened on a stale copy.
+
 ## 0.3.0
 
 ### Minor Changes
